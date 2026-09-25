@@ -745,3 +745,131 @@ export const consolidationPreviewTemplate = Handlebars.compile(`
     </div>
     {{/if}}
 `);
+
+/**
+ * Scene Reconciliation preview dialog template.
+ * Renders up to three optional sections (Arc entry, existing character updates, new
+ * character proposals) - each only appears when the corresponding data is present.
+ */
+export const sceneReconciliationPreviewTemplate = Handlebars.compile(`
+    <h3 data-i18n="STMemoryBooks_SceneReconciliationPreview_Title">Scene Reconciliation Preview</h3>
+    <div class="world_entry_form_control">
+        <small class="marginBot10" data-i18n="STMemoryBooks_SceneReconciliationPreview_Desc">Review proposed Arc and character entry updates before applying them. Every item below needs an explicit decision.</small>
+        {{#if lorebookName}}
+        <div class="fontsize90p opacity70p"><span data-i18n="STMemoryBooks_SceneReconciliationPreview_Lorebook">Lorebook</span>: {{lorebookName}}</div>
+        {{/if}}
+        {{#if sceneRange}}
+        <div class="fontsize90p opacity70p"><span data-i18n="STMemoryBooks_SceneReconciliationPreview_SceneRange">Scene</span>: {{sceneRange}}</div>
+        {{/if}}
+    </div>
+
+    {{#if showArc}}
+    <div class="world_entry_form_control stmb-box padding10 marginBot10 stmb-scenerecon-card" data-scenerecon-section="arc">
+        <h4 data-i18n="STMemoryBooks_SceneReconciliationPreview_ArcSectionTitle">Arc Entry Update</h4>
+        <div class="flex flexFlowRow gap10px marginBot10">
+            <label class="checkbox_label">
+                <input type="radio" name="stmb-scenerecon-arc-action" value="approve">
+                <span data-i18n="STMemoryBooks_SceneReconciliationPreview_Approve">Approve</span>
+            </label>
+            <label class="checkbox_label">
+                <input type="radio" name="stmb-scenerecon-arc-action" value="edit">
+                <span data-i18n="STMemoryBooks_SceneReconciliationPreview_EditApprove">Edit &amp; Approve</span>
+            </label>
+            <label class="checkbox_label">
+                <input type="radio" name="stmb-scenerecon-arc-action" value="reject">
+                <span data-i18n="STMemoryBooks_SceneReconciliationPreview_Reject">Reject</span>
+            </label>
+        </div>
+        <div class="stmb-regeneration-columns">
+            <section class="stmb-regeneration-column">
+                <h5 data-i18n="STMemoryBooks_Regeneration_Before">Before</h5>
+                <textarea class="text_pole stmb-regeneration-content" readonly>{{arc.oldContent}}</textarea>
+            </section>
+            <section class="stmb-regeneration-column">
+                <h5 data-i18n="STMemoryBooks_Regeneration_After">After</h5>
+                <label data-i18n="STMemoryBooks_Regeneration_Title">Title</label>
+                <input type="text" class="text_pole stmb-scenerecon-title" value="{{arc.titleValue}}">
+                <label data-i18n="STMemoryBooks_Regeneration_Content">Content</label>
+                <textarea class="text_pole stmb-regeneration-content stmb-scenerecon-content">{{arc.proposedContent}}</textarea>
+                <label data-i18n="STMemoryBooks_Regeneration_Keywords">Keywords</label>
+                <input type="text" class="text_pole stmb-scenerecon-keywords" value="{{arc.keywordsText}}">
+            </section>
+        </div>
+    </div>
+    {{/if}}
+
+    {{#if hasCharacterOperations}}
+    <div class="world_entry_form_control">
+        <h4><span data-i18n="STMemoryBooks_SceneReconciliationPreview_CharacterSectionTitlePrefix">Updates</span> {{characterCount}} <span data-i18n="STMemoryBooks_SceneReconciliationPreview_CharacterSectionTitleSuffix">existing character entries.</span></h4>
+    </div>
+    <div class="stmb-scenerecon-list">
+        {{#each characters}}
+        <details class="stmb-box padding10 marginBot10 stmb-scenerecon-card" data-scenerecon-section="character" data-character-index="{{index}}">
+            <summary>{{characterName}}</summary>
+            <div class="flex flexFlowRow gap10px marginTop10 marginBot10">
+                <label class="checkbox_label">
+                    <input type="radio" name="stmb-scenerecon-character-action-{{index}}" value="approve">
+                    <span data-i18n="STMemoryBooks_SceneReconciliationPreview_Approve">Approve</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="radio" name="stmb-scenerecon-character-action-{{index}}" value="edit">
+                    <span data-i18n="STMemoryBooks_SceneReconciliationPreview_EditApprove">Edit &amp; Approve</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="radio" name="stmb-scenerecon-character-action-{{index}}" value="reject">
+                    <span data-i18n="STMemoryBooks_SceneReconciliationPreview_Reject">Reject</span>
+                </label>
+            </div>
+            <div class="stmb-regeneration-columns">
+                <section class="stmb-regeneration-column">
+                    <h5 data-i18n="STMemoryBooks_Regeneration_Before">Before</h5>
+                    <textarea class="text_pole stmb-regeneration-content" readonly>{{oldContent}}</textarea>
+                </section>
+                <section class="stmb-regeneration-column">
+                    <h5 data-i18n="STMemoryBooks_Regeneration_After">After</h5>
+                    <label data-i18n="STMemoryBooks_Regeneration_Title">Title</label>
+                    <input type="text" class="text_pole stmb-scenerecon-title" value="{{titleValue}}">
+                    <label data-i18n="STMemoryBooks_Regeneration_Content">Content</label>
+                    <textarea class="text_pole stmb-regeneration-content stmb-scenerecon-content">{{proposedContent}}</textarea>
+                    <label data-i18n="STMemoryBooks_Regeneration_Keywords">Keywords</label>
+                    <input type="text" class="text_pole stmb-scenerecon-keywords" value="{{keywordsText}}">
+                </section>
+            </div>
+        </details>
+        {{/each}}
+    </div>
+    {{/if}}
+
+    {{#if hasNewCharacterProposals}}
+    <div class="world_entry_form_control">
+        <h4><span data-i18n="STMemoryBooks_SceneReconciliationPreview_NewCharacterSectionTitlePrefix">Creates</span> {{newCharacterCount}} <span data-i18n="STMemoryBooks_SceneReconciliationPreview_NewCharacterSectionTitleSuffix">new character entries (review required).</span></h4>
+    </div>
+    <div class="stmb-scenerecon-list">
+        {{#each newCharacters}}
+        <details class="stmb-box padding10 marginBot10 stmb-scenerecon-card" data-scenerecon-section="newCharacter" data-newcharacter-index="{{index}}">
+            <summary>{{characterName}}</summary>
+            <div class="flex flexFlowRow gap10px marginTop10 marginBot10">
+                <label class="checkbox_label">
+                    <input type="radio" name="stmb-scenerecon-newcharacter-action-{{index}}" value="create">
+                    <span data-i18n="STMemoryBooks_SceneReconciliationPreview_CreateEntry">Create Entry</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="radio" name="stmb-scenerecon-newcharacter-action-{{index}}" value="editCreate">
+                    <span data-i18n="STMemoryBooks_SceneReconciliationPreview_EditCreate">Edit &amp; Create</span>
+                </label>
+                <label class="checkbox_label">
+                    <input type="radio" name="stmb-scenerecon-newcharacter-action-{{index}}" value="skip">
+                    <span data-i18n="STMemoryBooks_SceneReconciliationPreview_Skip">Skip</span>
+                </label>
+            </div>
+            <label data-i18n="STMemoryBooks_Regeneration_Title">Title</label>
+            <input type="text" class="text_pole stmb-scenerecon-title" value="{{titleValue}}">
+            <label data-i18n="STMemoryBooks_Regeneration_Content">Content</label>
+            <textarea class="text_pole stmb-regeneration-content stmb-scenerecon-content">{{proposedContent}}</textarea>
+            <label data-i18n="STMemoryBooks_Regeneration_Keywords">Keywords</label>
+            <input type="text" class="text_pole stmb-scenerecon-keywords" value="{{keywordsText}}">
+        </details>
+        {{/each}}
+    </div>
+    {{/if}}
+`);

@@ -4,7 +4,7 @@
 import { saveSettingsDebounced } from '../../../../script.js';
 import { Popup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { DOMPurify } from '../../../../lib.js';
-import { simpleConfirmationTemplate, advancedOptionsTemplate, memoryPreviewTemplate, consolidationPreviewTemplate } from './templates.js';
+import { simpleConfirmationTemplate, advancedOptionsTemplate, memoryPreviewTemplate, consolidationPreviewTemplate, sceneReconciliationPreviewTemplate } from './templates.js';
 import { translate } from '../../../i18n.js';
 import { loadWorldInfo } from '../../../world-info.js';
 import { identifyMemoryEntries } from './addlore.js';
@@ -1130,6 +1130,245 @@ export async function showConsolidationPreviewPopup({
   } catch (error) {
     console.error(`${MODULE_NAME}: Error showing consolidation preview popup:`, error);
     return { action: 'cancel' };
+  } finally {
+    if (popup) {
+      activeMemoryPreviewPopups.delete(popup);
+    }
+  }
+}
+
+function noopSceneReconciliationResult() {
+  return {
+    action: 'cancel',
+    arcApproved: null,
+    arcEdits: null,
+    characterApprovals: new Map(),
+    characterEdits: new Map(),
+    newCharacterApprovals: new Map(),
+    newCharacterEdits: new Map(),
+  };
+}
+
+/**
+ * Show a review/approval popup for a Scene Reconciliation run (output of
+ * reconcileSceneWithLorebook() in sceneReconciliation.js). Renders up to three optional
+ * sections - Arc entry update, existing character updates, new character proposals - and
+ * requires an explicit Approve/Edit/Reject (or Create/Edit & Create/Skip) decision on every
+ * item before "Apply All Changes" can be pressed. This function only collects decisions; it
+ * never writes to the lorebook itself (that happens later via applySceneReconciliationChanges()).
+ *
+ * NOTE on return shape: `arcEdits` is an addition beyond the arcApproved/characterApprovals/
+ * characterEdits/newCharacterApprovals/newCharacterEdits fields originally specified for this
+ * function. The Arc section's UI (like the character sections) exposes editable title/content/
+ * keywords fields, but a dedicated field to carry those edits back to the caller was not part of
+ * the original spec. `arcEdits` was added to close that gap without changing any of the other
+ * fields; it mirrors `characterEdits`'s per-item shape but is a single object (or null) since
+ * there is only ever one Arc entry.
+ *
+ * @param {Object} params
+ * @param {Object|null} [params.arcOperation] - reconciliationResult.arcOperation
+ * @param {Array} [params.characterOperations] - reconciliationResult.characterOperations
+ * @param {Array} [params.newCharacterProposals] - reconciliationResult.newCharacterProposals
+ * @param {string} [params.lorebookName]
+ * @param {string} [params.sceneRange]
+ * @param {Object} [params.options]
+ * @returns {Promise<{
+ *   action: 'cancel'|'apply',
+ *   arcApproved: boolean|null,
+ *   arcEdits: {title: string, content: string, keywords: string[]}|null,
+ *   characterApprovals: Map<string, boolean>,
+ *   characterEdits: Map<string, {title: string, content: string, keywords: string[]}>,
+ *   newCharacterApprovals: Map<string, boolean>,
+ *   newCharacterEdits: Map<string, {title: string, content: string, keywords: string[]}>,
+ * }>} If there is nothing to review (no processed Arc operation, no processed character
+ *   operations, and no pending new-character proposals), no popup is shown and this resolves
+ *   immediately with a harmless no-op result (`action: 'cancel'`, everything else empty/null) -
+ *   callers should treat that as "nothing to do", not as a user rejection.
+ */
+export async function showSceneReconciliationPreviewPopup({
+  arcOperation = null,
+  characterOperations = [],
+  newCharacterProposals = [],
+  lorebookName = '',
+  sceneRange = '',
+  options = {},
+} = {}) {
+  let popup = null;
+  try {
+    const showArc = Boolean(arcOperation && arcOperation.status === 'processed');
+    const reviewableCharacterOps = (Array.isArray(characterOperations) ? characterOperations : [])
+      .filter(op => op && op.status === 'processed');
+    const reviewableNewCharacters = (Array.isArray(newCharacterProposals) ? newCharacterProposals : [])
+      .filter(proposal => proposal && proposal.status === 'pending');
+
+    if (!showArc && reviewableCharacterOps.length === 0 && reviewableNewCharacters.length === 0) {
+      return noopSceneReconciliationResult();
+    }
+
+    const templateData = {
+      lorebookName: String(lorebookName || ''),
+      sceneRange: String(sceneRange || ''),
+      showArc,
+      arc: showArc ? {
+        titleValue: String(arcOperation.entry?.comment || ''),
+        oldContent: String(arcOperation.oldContent || ''),
+        proposedContent: String(arcOperation.proposedContent || ''),
+        keywordsText: previewKeywordsToString(arcOperation.entry?.key),
+      } : null,
+      hasCharacterOperations: reviewableCharacterOps.length > 0,
+      characterCount: reviewableCharacterOps.length,
+      characters: reviewableCharacterOps.map((op, index) => ({
+        index,
+        characterName: op.characterName,
+        titleValue: String(op.entry?.comment || op.characterName || ''),
+        oldContent: String(op.oldContent || ''),
+        proposedContent: String(op.proposedContent || ''),
+        keywordsText: previewKeywordsToString(op.entry?.key),
+      })),
+      hasNewCharacterProposals: reviewableNewCharacters.length > 0,
+      newCharacterCount: reviewableNewCharacters.length,
+      newCharacters: reviewableNewCharacters.map((proposal, index) => ({
+        index,
+        characterName: proposal.characterName,
+        titleValue: String(proposal.proposedTitle || proposal.characterName || ''),
+        proposedContent: String(proposal.proposedContent || ''),
+        keywordsText: previewKeywordsToString(proposal.proposedKeywords),
+      })),
+    };
+
+    const content = DOMPurify.sanitize(sceneReconciliationPreviewTemplate(templateData));
+    safePlayMessageSound();
+
+    popup = new Popup(content, POPUP_TYPE.TEXT, '', {
+      okButton: translate('Apply All Changes', 'STMemoryBooks_SceneReconciliationPreview_ApplyAll'),
+      cancelButton: translate('Cancel', 'STMemoryBooks_Cancel'),
+      allowVerticalScrolling: true,
+      wide: true,
+      large: true,
+    });
+    markStmbPopup(popup);
+
+    const popupElement = popup.dlg;
+    const decisionGroups = [];
+    if (showArc) {
+      decisionGroups.push({ type: 'arc', radioName: 'stmb-scenerecon-arc-action' });
+    }
+    reviewableCharacterOps.forEach((op, index) => {
+      decisionGroups.push({ type: 'character', index, radioName: `stmb-scenerecon-character-action-${index}` });
+    });
+    reviewableNewCharacters.forEach((proposal, index) => {
+      decisionGroups.push({ type: 'newCharacter', index, radioName: `stmb-scenerecon-newcharacter-action-${index}` });
+    });
+
+    const validateReconciliation = () => {
+      const isValid = decisionGroups.every(group =>
+        Boolean(popupElement?.querySelector(`input[name="${group.radioName}"]:checked`)),
+      );
+      if (popup.okButton) {
+        popup.okButton.classList.toggle('disabled', !isValid);
+        popup.okButton.setAttribute('aria-disabled', String(!isValid));
+      }
+      return isValid;
+    };
+
+    popupElement?.querySelectorAll('input[type="radio"]').forEach(radio => {
+      radio.addEventListener('change', validateReconciliation);
+    });
+    popup.onClosing = closingPopup => {
+      if (closingPopup.result !== POPUP_RESULT.AFFIRMATIVE) {
+        return true;
+      }
+      if (validateReconciliation()) {
+        return true;
+      }
+      toastr.error(
+        translate('Every item needs an explicit Approve, Edit, Reject, or Skip decision before applying changes.', 'STMemoryBooks_SceneReconciliationPreview_DecisionRequired'),
+        'STMemoryBooks',
+      );
+      return false;
+    };
+    validateReconciliation();
+
+    activeMemoryPreviewPopups.add(popup);
+    const result = await popup.show();
+    if (result !== POPUP_RESULT.AFFIRMATIVE || !popup.dlg) {
+      return noopSceneReconciliationResult();
+    }
+
+    const finalPopupElement = popup.dlg;
+    let arcApproved = null;
+    let arcEdits = null;
+    const characterApprovals = new Map();
+    const characterEdits = new Map();
+    const newCharacterApprovals = new Map();
+    const newCharacterEdits = new Map();
+
+    if (showArc) {
+      const arcCard = finalPopupElement.querySelector('.stmb-scenerecon-card[data-scenerecon-section="arc"]');
+      const action = arcCard?.querySelector('input[name="stmb-scenerecon-arc-action"]:checked')?.value || 'reject';
+      arcApproved = action !== 'reject';
+      if (arcApproved) {
+        const title = arcCard?.querySelector('.stmb-scenerecon-title')?.value?.trim() || '';
+        const contentText = arcCard?.querySelector('.stmb-scenerecon-content')?.value?.trim() || '';
+        const keywordsText = arcCard?.querySelector('.stmb-scenerecon-keywords')?.value?.trim() || '';
+        const baselineTitle = String(arcOperation.entry?.comment || '');
+        const baselineContent = String(arcOperation.proposedContent || '');
+        const baselineKeywords = previewKeywordsToString(arcOperation.entry?.key);
+        if (title !== baselineTitle || contentText !== baselineContent || keywordsText !== baselineKeywords) {
+          arcEdits = { title, content: contentText, keywords: parsePreviewKeywords(keywordsText) };
+        }
+      }
+    }
+
+    for (const op of reviewableCharacterOps) {
+      const index = reviewableCharacterOps.indexOf(op);
+      const actionCard = finalPopupElement.querySelector(`.stmb-scenerecon-card[data-scenerecon-section="character"][data-character-index="${index}"]`);
+      const action = actionCard?.querySelector(`input[name="stmb-scenerecon-character-action-${index}"]:checked`)?.value || 'reject';
+      const approved = action !== 'reject';
+      characterApprovals.set(op.characterName, approved);
+      if (approved) {
+        const title = actionCard?.querySelector('.stmb-scenerecon-title')?.value?.trim() || '';
+        const contentText = actionCard?.querySelector('.stmb-scenerecon-content')?.value?.trim() || '';
+        const keywordsText = actionCard?.querySelector('.stmb-scenerecon-keywords')?.value?.trim() || '';
+        const baselineTitle = String(op.entry?.comment || op.characterName || '');
+        const baselineContent = String(op.proposedContent || '');
+        const baselineKeywords = previewKeywordsToString(op.entry?.key);
+        if (title !== baselineTitle || contentText !== baselineContent || keywordsText !== baselineKeywords) {
+          characterEdits.set(op.characterName, { title, content: contentText, keywords: parsePreviewKeywords(keywordsText) });
+        }
+      }
+    }
+
+    reviewableNewCharacters.forEach((proposal, index) => {
+      const card = finalPopupElement.querySelector(`.stmb-scenerecon-card[data-scenerecon-section="newCharacter"][data-newcharacter-index="${index}"]`);
+      const action = card?.querySelector(`input[name="stmb-scenerecon-newcharacter-action-${index}"]:checked`)?.value || 'skip';
+      const approved = action !== 'skip';
+      newCharacterApprovals.set(proposal.characterName, approved);
+      if (approved) {
+        const title = card?.querySelector('.stmb-scenerecon-title')?.value?.trim() || '';
+        const contentText = card?.querySelector('.stmb-scenerecon-content')?.value?.trim() || '';
+        const keywordsText = card?.querySelector('.stmb-scenerecon-keywords')?.value?.trim() || '';
+        const baselineTitle = String(proposal.proposedTitle || proposal.characterName || '');
+        const baselineContent = String(proposal.proposedContent || '');
+        const baselineKeywords = previewKeywordsToString(proposal.proposedKeywords);
+        if (title !== baselineTitle || contentText !== baselineContent || keywordsText !== baselineKeywords) {
+          newCharacterEdits.set(proposal.characterName, { title, content: contentText, keywords: parsePreviewKeywords(keywordsText) });
+        }
+      }
+    });
+
+    return {
+      action: 'apply',
+      arcApproved,
+      arcEdits,
+      characterApprovals,
+      characterEdits,
+      newCharacterApprovals,
+      newCharacterEdits,
+    };
+  } catch (error) {
+    console.error(`${MODULE_NAME}: Error showing scene reconciliation preview popup:`, error);
+    return noopSceneReconciliationResult();
   } finally {
     if (popup) {
       activeMemoryPreviewPopups.delete(popup);

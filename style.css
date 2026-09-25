@@ -827,6 +827,11 @@ p.stmb-help-drawer-copy {
     resize: vertical;
 }
 
+.stmb-scenerecon-card > summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
 .stmb-regeneration-linked-warning {
     margin: 0.75rem 0;
     padding: 0.75rem;

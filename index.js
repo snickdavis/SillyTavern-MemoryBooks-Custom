@@ -53,7 +53,10 @@ import {
   getRangeFromMemoryEntry,
   generateEntryTitleAtNumber,
   normalizeLorebookEntrySettings,
+  applySceneReconciliationChanges,
+  getArcEntry,
 } from "./addlore.js";
+import { reconcileSceneWithLorebook } from "./sceneReconciliation.js";
 import { autoCreateLorebook } from "./autocreate.js";
 import { createBranchLorebookController } from "./branchLorebooks.js";
 import {
@@ -100,6 +103,7 @@ import {
   showConsolidationPreviewPopup,
   showRegenerationReviewPopup,
   closeActiveMemoryPreviewPopups,
+  showSceneReconciliationPreviewPopup,
 } from "./confirmationPopup.js";
 import {
   getDefaultPrompt,
@@ -6923,7 +6927,215 @@ async function showConsolidationRecoveryPopup() {
   await shown;
 }
 
-async function initiateMemoryCreation(selectedProfileIndex = null) {
+/**
+ * Reads Scene Reconciliation module settings defensively - the settings-UI fields
+ * (sceneReconciliationEnabled/arcReconciliationMode/previewBeforeReconciliationCommit) may not
+ * exist yet if contextSettingsManager.js's UI task hasn't landed, so every field falls back to a
+ * safe default rather than throwing.
+ */
+function getSceneReconciliationModuleSettings(settings) {
+  const moduleSettings = settings?.moduleSettings || extension_settings?.STMemoryBooks?.moduleSettings || {};
+  return {
+    enabled: moduleSettings.sceneReconciliationEnabled === true,
+    arcReconciliationMode: moduleSettings.arcReconciliationMode || "auto",
+    // Fail safe: default to showing the preview popup unless explicitly disabled.
+    previewBeforeCommit: moduleSettings.previewBeforeReconciliationCommit !== false,
+  };
+}
+
+/**
+ * Scene Reconciliation is only offered when the feature is on, a lorebook is actually bound,
+ * and either the Arc entry can be resolved or the mode is "manual" (no Arc entry required).
+ */
+function isSceneReconciliationEligible(settings, lorebookValidation) {
+  const recon = getSceneReconciliationModuleSettings(settings);
+  if (!recon.enabled) return false;
+  if (!lorebookValidation?.valid || !lorebookValidation?.name || !lorebookValidation?.data) return false;
+  if (recon.arcReconciliationMode === "manual") return true;
+  const { entry } = getArcEntry(lorebookValidation.data, lorebookValidation.data);
+  return !!entry;
+}
+
+/**
+ * "Create new memory" vs "Reconcile with existing entries" chooser, modeled on
+ * showGroupRegenerationScopePopup's two-custom-button pattern.
+ * @returns {Promise<'createNew'|'reconcile'|'cancel'>}
+ */
+async function showCreateOrReconcileChoicePopup() {
+  const content = DOMPurify.sanitize(`
+    <h3>${escapeHtml(translate("Create memory or reconcile?", "STMemoryBooks_SceneReconciliation_ChoiceTitle"))}</h3>
+    <p>${escapeHtml(translate(
+      "This Memory Book has entries eligible for Scene Reconciliation. You can create a brand-new memory entry as usual, or update the existing Arc/character entries with this scene instead.",
+      "STMemoryBooks_SceneReconciliation_ChoiceBody",
+    ))}</p>
+  `);
+  const popup = new Popup(content, POPUP_TYPE.TEXT, "", {
+    okButton: false,
+    cancelButton: translate("Cancel", "STMemoryBooks_Cancel"),
+    customButtons: [
+      {
+        text: translate("Create new memory", "STMemoryBooks_SceneReconciliation_ChoiceCreateNew"),
+        result: POPUP_RESULT.CUSTOM1,
+        classes: ["menu_button"],
+      },
+      {
+        text: translate("Reconcile with existing entries", "STMemoryBooks_SceneReconciliation_ChoiceReconcile"),
+        result: POPUP_RESULT.CUSTOM2,
+        classes: ["menu_button"],
+      },
+    ],
+  });
+  markStmbPopup(popup);
+  const result = await popup.show();
+  if (result === POPUP_RESULT.CUSTOM1) return "createNew";
+  if (result === POPUP_RESULT.CUSTOM2) return "reconcile";
+  return "cancel";
+}
+
+/**
+ * Splices the preview popup's approvals/edits back onto reconciliationResult in place, since
+ * applySceneReconciliationChanges() (addlore.js) applies any status:'processed' arc/character
+ * operation unconditionally and reads edited content from `proposedContent`, not from a separate
+ * edits field. Title edits on EXISTING arc/character entries are intentionally not applied here:
+ * applySceneReconciliationChanges's batch upsert matches existing entries by title, so renaming
+ * entry.comment before that call would make it fail to find the original entry and create a
+ * duplicate instead of renaming it. New-character proposals have no such hazard (there is no
+ * existing entry to match), so their title/content/keyword edits are copied through untouched.
+ */
+function applySceneReconciliationPreviewDecisions(reconciliationResult, decisions) {
+  const arcOperation = reconciliationResult?.arcOperation;
+  if (arcOperation?.status === "processed") {
+    if (decisions.arcApproved !== true) {
+      arcOperation.status = "skipped";
+    } else if (decisions.arcEdits) {
+      arcOperation.proposedContent = decisions.arcEdits.content;
+      if (arcOperation.entry && Array.isArray(decisions.arcEdits.keywords)) {
+        arcOperation.entry.key = decisions.arcEdits.keywords;
+      }
+    }
+  }
+
+  for (const charOp of Array.isArray(reconciliationResult?.characterOperations) ? reconciliationResult.characterOperations : []) {
+    if (charOp?.status !== "processed") continue;
+    if (decisions.characterApprovals?.get(charOp.characterName) !== true) {
+      charOp.status = "skipped";
+      continue;
+    }
+    const edits = decisions.characterEdits?.get(charOp.characterName);
+    if (edits) {
+      charOp.proposedContent = edits.content;
+      if (charOp.entry && Array.isArray(edits.keywords)) {
+        charOp.entry.key = edits.keywords;
+      }
+    }
+  }
+
+  for (const proposal of Array.isArray(reconciliationResult?.newCharacterProposals) ? reconciliationResult.newCharacterProposals : []) {
+    if (proposal?.status !== "pending") continue;
+    const approved = decisions.newCharacterApprovals?.get(proposal.characterName) === true;
+    proposal.userApproved = approved;
+    if (approved) {
+      const edits = decisions.newCharacterEdits?.get(proposal.characterName);
+      if (edits) {
+        proposal.userEdits = edits;
+      }
+    }
+  }
+}
+
+/**
+ * Runs the full Reconcile flow: compile the same scene range, call
+ * reconcileSceneWithLorebook() for proposals, optionally preview/collect approvals via
+ * showSceneReconciliationPreviewPopup(), then write via applySceneReconciliationChanges().
+ * Never partially writes: any cancellation/compile/AI failure returns false before the apply call.
+ * @returns {Promise<boolean>}
+ */
+async function runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings) {
+  const { profileSettings, settings } = effectiveSettings;
+  const recon = getSceneReconciliationModuleSettings(settings);
+
+  toastr.info(
+    translate("Reconciling scene with existing entries...", "STMemoryBooks_SceneReconciliation_Working"),
+    "STMemoryBooks",
+    { timeOut: 0 },
+  );
+
+  let reconciliationResult;
+  try {
+    const sceneRequest = createSceneRequest(sceneData.sceneStart, sceneData.sceneEnd);
+    const compiledScene = compileScene(sceneRequest);
+    const validation = validateCompiledScene(compiledScene);
+    if (!validation.valid) {
+      toastr.clear();
+      toastr.error(
+        __st_t_tag`Scene compilation failed: ${validation.errors.join(", ")}`,
+        "STMemoryBooks",
+      );
+      return false;
+    }
+
+    reconciliationResult = await reconcileSceneWithLorebook({
+      compiledScene,
+      lorebookName: lorebookValidation.name,
+      lorebookData: lorebookValidation.data,
+      profileSettings,
+    });
+  } catch (error) {
+    toastr.clear();
+    console.error("STMemoryBooks: Scene reconciliation failed:", error);
+    toastr.error(
+      __st_t_tag`Scene reconciliation failed: ${error.message}`,
+      "STMemoryBooks",
+    );
+    return false;
+  }
+
+  toastr.clear();
+
+  if (Array.isArray(reconciliationResult.errors) && reconciliationResult.errors.length > 0) {
+    console.warn("STMemoryBooks: Scene reconciliation had partial errors:", reconciliationResult.errors);
+  }
+
+  if (recon.previewBeforeCommit) {
+    const userDecisions = await showSceneReconciliationPreviewPopup({
+      arcOperation: reconciliationResult.arcOperation,
+      characterOperations: reconciliationResult.characterOperations,
+      newCharacterProposals: reconciliationResult.newCharacterProposals,
+      lorebookName: lorebookValidation.name,
+      sceneRange: `${sceneData.sceneStart}-${sceneData.sceneEnd}`,
+    });
+
+    // Cancelled, or nothing was eligible for review - abort cleanly, no writes.
+    if (userDecisions.action !== "apply") {
+      return false;
+    }
+
+    applySceneReconciliationPreviewDecisions(reconciliationResult, userDecisions);
+  }
+
+  const applyResult = await applySceneReconciliationChanges(
+    lorebookValidation.name,
+    lorebookValidation.data,
+    reconciliationResult,
+  );
+
+  if (Array.isArray(applyResult.errors) && applyResult.errors.length > 0) {
+    toastr.error(
+      __st_t_tag`Scene reconciliation applied with errors: ${applyResult.errors.join(", ")}`,
+      "STMemoryBooks",
+    );
+    return false;
+  }
+
+  toastr.success(
+    __st_t_tag`Scene reconciled: ${applyResult.updatedCount} updated, ${applyResult.createdCount} created.`,
+    "STMemoryBooks",
+  );
+
+  return true;
+}
+
+async function initiateMemoryCreation(selectedProfileIndex = null, options = {}) {
   if (guardPendingProgress()) return false;
   // Early validation checks (no flag set yet) - GROUP CHAT COMPATIBLE
   const context = getCurrentMemoryBooksContext();
@@ -7092,6 +7304,24 @@ async function initiateMemoryCreation(selectedProfileIndex = null) {
     if (currentPopupInstance) {
       currentPopupInstance.completeCancelled();
       currentPopupInstance = null;
+    }
+
+    // Scene Reconciliation is an interactive, direct-write alternative to the queued-jobs
+    // pipeline, so it's only offered outside of jobs mode and when explicitly allowed (batch
+    // callers like /stmb-catchup pass allowSceneReconciliationPrompt: false to stay non-interactive).
+    if (
+      options.allowSceneReconciliationPrompt !== false &&
+      !areStmbJobsEnabled() &&
+      isSceneReconciliationEligible(settings, lorebookValidation)
+    ) {
+      const choice = await showCreateOrReconcileChoicePopup();
+      if (choice === "cancel") {
+        return false;
+      }
+      if (choice === "reconcile") {
+        return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings);
+      }
+      // choice === "createNew" falls through to the existing behavior, unchanged.
     }
 
     if (areStmbJobsEnabled()) {

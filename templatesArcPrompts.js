@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { translate } from '../../../i18n.js';
+import { tr } from './i18nHelpers.js';
 import {
     CONSOLIDATION_REGENERATION_PRESET_KEY,
     GROUP_CHAT_CONSOLIDATION_PRESET_KEY,
@@ -627,4 +628,132 @@ export function getBuiltInArcPrompts() {
  */
 export function getDefaultArcPrompt() {
   return getDefinitions().arc_default;
+}
+
+/**
+ * Render a compiled scene's messages as plain "Name: text" lines for embedding inside a prompt.
+ * @param {Object} compiledScene - Output of chatcompile.js's compileScene()
+ * @returns {string}
+ */
+function formatSceneMessages(compiledScene) {
+    const messages = Array.isArray(compiledScene?.messages) ? compiledScene.messages : [];
+    if (messages.length === 0) return '';
+    return messages
+        .map((m) => `${m?.name || translate('Unknown', 'common.unknown')}: ${(m?.mes || '').toString().trim()}`)
+        .join('\n');
+}
+
+/**
+ * Build the Scene Reconciliation prompt used to reconcile a CURRENT CANON ENTRY (either an
+ * existing character entry or the story's Arc entry) against a NEW SCENE, resolving
+ * contradictions while preserving everything not directly contradicted.
+ *
+ * Reused for both Arc-entry reconciliation and existing-character-entry reconciliation
+ * (see sceneReconciliation.js's reconcileSceneWithLorebook()) - the reconciliation logic is
+ * identical for both, only the "subject" description differs.
+ *
+ * @param {Object} params
+ * @param {Object} params.entry - Existing lorebook entry being reconciled (uses entry.content)
+ * @param {Object} params.compiledScene - Output of chatcompile.js's compileScene()
+ * @param {string|null} [params.characterName] - Character name, when isArcEntry is false
+ * @param {boolean} [params.isArcEntry] - True when reconciling the story's Arc timeline entry
+ * @returns {string} Complete prompt ready to send to the model
+ */
+export function getCharacterEntryReconciliationPrompt({ entry, compiledScene, characterName = null, isArcEntry = false } = {}) {
+    const subject = isArcEntry
+        ? translate("the story's Arc timeline", 'STMemoryBooks_Reconciliation_SubjectArc')
+        : tr(
+            'STMemoryBooks_Reconciliation_SubjectCharacter',
+            'the character "{{name}}"',
+            { name: characterName || entry?.title || translate('Unknown', 'common.unknown') },
+        );
+
+    const header = tr(
+        'STMemoryBooks_CharacterReconciliationPrompt_Default',
+        `You are an expert continuity editor for an ongoing story.
+
+Your task is to reconcile the CURRENT CANON ENTRY for {{subject}} against a NEW SCENE that has just occurred, so the entry stays accurate and up to date.
+
+Follow these rules in order:
+1. Treat the CURRENT CANON ENTRY as established canon. Do not discard, contradict, or remove any fact unless the NEW SCENE directly contradicts it.
+2. Read the NEW SCENE carefully for events, statements, or details involving or mentioning {{subject}}.
+3. Where the NEW SCENE directly contradicts the CURRENT CANON ENTRY (for example, "X is about to leave" becoming "X has now arrived"), rewrite only the contradicted sections to reflect the new truth. Leave everything else unchanged.
+4. Add any new facts, relationships, or status changes revealed by the NEW SCENE that do not already appear in the CURRENT CANON ENTRY.
+5. Do not invent facts that are not supported by either the CURRENT CANON ENTRY or the NEW SCENE.
+
+Return valid JSON only, with no commentary or code fences, in this structure:
+{
+  "title": "Short descriptive entry title",
+  "content": "The full reconciled entry content as a single string",
+  "keywords": ["keyword1", "keyword2"]
+}`,
+        { subject },
+    );
+
+    const lines = [header, ''];
+
+    lines.push(tr('STMemoryBooks_Reconciliation_CurrentEntryStart', '=== CURRENT CANON ENTRY ==='));
+    lines.push((entry?.content || '').toString().trim());
+    lines.push(tr('STMemoryBooks_Reconciliation_CurrentEntryEnd', '=== END CURRENT CANON ENTRY ==='));
+    lines.push('');
+
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneStart', '=== NEW SCENE ==='));
+    lines.push(formatSceneMessages(compiledScene));
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneEnd', '=== END NEW SCENE ==='));
+    lines.push('');
+
+    return lines.join('\n');
+}
+
+/**
+ * Build the Scene Reconciliation prompt used to generate a brand-new character profile entry
+ * for a character appearing in a scene for the first time (no prior canon entry exists).
+ *
+ * @param {Object} params
+ * @param {string} params.characterName - Name of the newly-appearing character
+ * @param {Object} params.compiledScene - Output of chatcompile.js's compileScene()
+ * @param {string|null} [params.context] - Optional story-so-far context (may be empty)
+ * @returns {string} Complete prompt ready to send to the model
+ */
+export function getNewCharacterEntryPrompt({ characterName, compiledScene, context = null } = {}) {
+    const name = characterName || translate('Unknown', 'common.unknown');
+
+    const header = tr(
+        'STMemoryBooks_NewCharacterPrompt_Default',
+        `You are an expert continuity editor for an ongoing story.
+
+The character "{{name}}" appears in the NEW SCENE below for the first time. No prior canon entry exists for them yet. Your task is to write a new character profile entry based only on what the NEW SCENE (and, if provided, the CONTEXT) establishes.
+
+Write the "content" field as a profile covering, in order:
+1. Identity - name, aliases, and origin, if established.
+2. Appearance - physical description, if established.
+3. Role & Relationships - their role in the story and relationships to the protagonist and other characters.
+4. Key Traits - personality and motivations as shown in the scene.
+5. What Happened - a summary of their actions in this scene.
+6. Continuity Hooks - facts, promises, secrets, or open threads likely to matter later.
+
+Do not invent facts that are not supported by the NEW SCENE or CONTEXT. Target 300-600 words for the "content" field.
+
+Return valid JSON only, with no commentary or code fences, in this structure:
+{
+  "title": "Character name",
+  "content": "The full character profile as a single string",
+  "keywords": ["keyword1", "keyword2"]
+}`,
+        { name },
+    );
+
+    const lines = [header, ''];
+
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneStart', '=== NEW SCENE ==='));
+    lines.push(formatSceneMessages(compiledScene));
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneEnd', '=== END NEW SCENE ==='));
+    lines.push('');
+
+    lines.push(tr('STMemoryBooks_Reconciliation_ContextStart', '=== CONTEXT ==='));
+    lines.push((context || '').toString().trim());
+    lines.push(tr('STMemoryBooks_Reconciliation_ContextEnd', '=== END CONTEXT ==='));
+    lines.push('');
+
+    return lines.join('\n');
 }

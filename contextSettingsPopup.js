@@ -4,7 +4,7 @@
 import { Popup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { DOMPurify } from '../../../../lib.js';
 import { escapeHtml, getSortableDelay } from '../../../utils.js';
-import { world_names, loadWorldInfo } from '../../../world-info.js';
+import { world_names, loadWorldInfo, saveWorldInfo } from '../../../world-info.js';
 import { translate, applyLocale } from '../../../i18n.js';
 import { getSceneMarkers, saveMetadataForCurrentContext } from './sceneManager.js';
 import {
@@ -13,10 +13,12 @@ import {
     exportContextSettingsJSON,
     getContextSetting,
     getMigratedContextSettingKeyForProfile,
+    getSceneReconciliationSettings,
     importContextSettingsJSON,
     listContextSettings,
     removeContextSetting,
     resolveContextEntryRows,
+    updateSceneReconciliationSetting,
     upsertContextSetting,
 } from './contextSettingsManager.js';
 import {
@@ -25,6 +27,7 @@ import {
     normalizeAdditionalContextEntries,
     withGoBackButton,
 } from './utils.js';
+import { markEntryAsArc, getArcEntry, clearArcEntry } from './addlore.js';
 import { tr } from './i18nHelpers.js';
 
 function hasChatContextSelection(markers = getSceneMarkers() || {}) {
@@ -173,6 +176,190 @@ async function populateEntrySelect(select, lorebookName) {
         console.warn('STMemoryBooks: Failed to load entries for context setting picker', error);
         select.innerHTML = `<option value="">${escapeHtml(translate('Failed to load entries', 'STMemoryBooks_Profile_AlsoIncludeLoadFailed'))}</option>`;
     }
+}
+
+function renderSceneReconciliationSettingsGroup(settings) {
+    const s = settings || {};
+    const modeOption = (value, label, i18nKey) => `<option value="${escapeHtml(value)}" ${s.arcReconciliationMode === value ? 'selected' : ''}>${escapeHtml(translate(label, i18nKey))}</option>`;
+    return `
+        <details class="stmb-box padding10 marginBot10" id="stmb-scenerecon-settings-group">
+            <summary>${escapeHtml(translate('Scene Reconciliation', 'STMemoryBooks_SceneRecon_Title'))}</summary>
+            <div class="world_entry_form_control">
+                <label class="checkbox_label" for="stmb-scenerecon-enabled">
+                    <input type="checkbox" id="stmb-scenerecon-enabled" ${s.sceneReconciliationEnabled ? 'checked' : ''}>
+                    <span>${escapeHtml(translate('Enable scene reconciliation mode', 'STMemoryBooks_SceneRecon_Enabled'))}</span>
+                </label>
+            </div>
+            <div class="world_entry_form_control">
+                <label for="stmb-scenerecon-mode">
+                    <span>${escapeHtml(translate('Arc detection mode', 'STMemoryBooks_SceneRecon_Mode'))}</span>
+                    <select id="stmb-scenerecon-mode" class="text_pole">
+                        ${modeOption('auto', 'Auto', 'STMemoryBooks_SceneRecon_ModeAuto')}
+                        ${modeOption('manual', 'Manual', 'STMemoryBooks_SceneRecon_ModeManual')}
+                        ${modeOption('disabled', 'Disabled', 'STMemoryBooks_SceneRecon_ModeDisabled')}
+                    </select>
+                </label>
+            </div>
+            <div class="world_entry_form_control">
+                <label for="stmb-scenerecon-max-new-characters">
+                    <span>${escapeHtml(translate('Max new characters per run', 'STMemoryBooks_SceneRecon_MaxNewCharacters'))}</span>
+                    <input type="number" id="stmb-scenerecon-max-new-characters" class="text_pole" min="1" max="50" value="${Number(s.maxNewCharactersPerRun) || 10}">
+                </label>
+            </div>
+            <div class="world_entry_form_control">
+                <label class="checkbox_label" for="stmb-scenerecon-autoskip-single">
+                    <input type="checkbox" id="stmb-scenerecon-autoskip-single" ${s.autoSkipSingleCharacterSuggestions ? 'checked' : ''}>
+                    <span>${escapeHtml(translate('Auto-skip single new-character suggestion', 'STMemoryBooks_SceneRecon_AutoSkipSingle'))}</span>
+                </label>
+            </div>
+            <div class="world_entry_form_control">
+                <label class="checkbox_label" for="stmb-scenerecon-preview-commit">
+                    <input type="checkbox" id="stmb-scenerecon-preview-commit" ${s.previewBeforeReconciliationCommit ? 'checked' : ''}>
+                    <span>${escapeHtml(translate('Show preview before commit', 'STMemoryBooks_SceneRecon_PreviewBeforeCommit'))}</span>
+                </label>
+            </div>
+            <details class="marginTop10">
+                <summary>${escapeHtml(translate('Advanced', 'STMemoryBooks_SceneRecon_Advanced'))}</summary>
+                <div class="world_entry_form_control">
+                    <label for="stmb-scenerecon-char-prompt-override">
+                        <span>${escapeHtml(translate('Character entry reconciliation prompt override', 'STMemoryBooks_SceneRecon_CharPromptOverride'))}</span>
+                    </label>
+                    <textarea id="stmb-scenerecon-char-prompt-override" class="text_pole" rows="6" placeholder="${escapeHtml(translate('Leave empty to use the built-in default prompt.', 'STMemoryBooks_SceneRecon_PromptOverridePlaceholder'))}">${escapeHtml(s.characterEntryReconciliationPrompt || '')}</textarea>
+                </div>
+                <div class="world_entry_form_control">
+                    <label for="stmb-scenerecon-new-char-prompt-override">
+                        <span>${escapeHtml(translate('New character entry prompt override', 'STMemoryBooks_SceneRecon_NewCharPromptOverride'))}</span>
+                    </label>
+                    <textarea id="stmb-scenerecon-new-char-prompt-override" class="text_pole" rows="6" placeholder="${escapeHtml(translate('Leave empty to use the built-in default prompt.', 'STMemoryBooks_SceneRecon_PromptOverridePlaceholder'))}">${escapeHtml(s.newCharacterEntryPrompt || '')}</textarea>
+                </div>
+            </details>
+            <div class="world_entry_form_control marginTop10">
+                <h4>${escapeHtml(translate('Arc Entry', 'STMemoryBooks_SceneRecon_ArcEntryTitle'))}</h4>
+                <small class="opacity70p">${escapeHtml(translate('Choose a lorebook, then designate which entry tracks the story\'s Arc timeline.', 'STMemoryBooks_SceneRecon_ArcEntryDesc'))}</small>
+                <div id="stmb-scenerecon-arc-entry-status" class="marginTop5"></div>
+                <div class="buttons_block gap10px marginTop5">
+                    <label for="stmb-scenerecon-arc-lorebook" class="flex1">
+                        <span>${escapeHtml(translate('Lorebook', 'STMemoryBooks_Profile_AlsoIncludeLorebook'))}</span>
+                        <select id="stmb-scenerecon-arc-lorebook" class="text_pole"></select>
+                    </label>
+                    <button id="stmb-scenerecon-arc-mark" type="button" class="menu_button whitespacenowrap">${escapeHtml(translate('Mark Selected Entry as Arc', 'STMemoryBooks_SceneRecon_MarkArc'))}</button>
+                    <button id="stmb-scenerecon-arc-clear" type="button" class="menu_button whitespacenowrap">${escapeHtml(translate('Clear Arc Binding', 'STMemoryBooks_SceneRecon_ClearArc'))}</button>
+                </div>
+            </div>
+        </details>
+    `;
+}
+
+function bindSceneReconciliationSettingsControls(popup) {
+    const dlg = popup.dlg;
+    dlg.querySelector('#stmb-scenerecon-enabled')?.addEventListener('change', event => {
+        updateSceneReconciliationSetting('sceneReconciliationEnabled', !!event.target.checked);
+    });
+    dlg.querySelector('#stmb-scenerecon-mode')?.addEventListener('change', event => {
+        updateSceneReconciliationSetting('arcReconciliationMode', event.target.value);
+    });
+    dlg.querySelector('#stmb-scenerecon-max-new-characters')?.addEventListener('change', event => {
+        const parsed = Number.parseInt(event.target.value, 10);
+        event.target.value = String(updateSceneReconciliationSetting('maxNewCharactersPerRun', Number.isFinite(parsed) ? parsed : 10));
+    });
+    dlg.querySelector('#stmb-scenerecon-autoskip-single')?.addEventListener('change', event => {
+        updateSceneReconciliationSetting('autoSkipSingleCharacterSuggestions', !!event.target.checked);
+    });
+    dlg.querySelector('#stmb-scenerecon-preview-commit')?.addEventListener('change', event => {
+        updateSceneReconciliationSetting('previewBeforeReconciliationCommit', !!event.target.checked);
+    });
+    dlg.querySelector('#stmb-scenerecon-char-prompt-override')?.addEventListener('change', event => {
+        updateSceneReconciliationSetting('characterEntryReconciliationPrompt', event.target.value);
+    });
+    dlg.querySelector('#stmb-scenerecon-new-char-prompt-override')?.addEventListener('change', event => {
+        updateSceneReconciliationSetting('newCharacterEntryPrompt', event.target.value);
+    });
+}
+
+async function renderArcEntryStatus(container, lorebookName) {
+    if (!container) return;
+    if (!lorebookName) {
+        container.innerHTML = DOMPurify.sanitize(`<div class="opacity70p">${escapeHtml(translate('Select a lorebook to configure its Arc entry.', 'STMemoryBooks_SceneRecon_ArcSelectLorebook'))}</div>`);
+        return;
+    }
+    try {
+        const data = await loadWorldInfo(lorebookName);
+        const { entry } = getArcEntry(data, data);
+        container.innerHTML = DOMPurify.sanitize(entry
+            ? `<div>${escapeHtml(tr('STMemoryBooks_SceneRecon_ArcCurrent', 'Arc entry: {{title}} (uid {{uid}})', { title: getLorebookEntryDisplayName(entry, entry.uid), uid: String(entry.uid) }))}</div>`
+            : `<div class="opacity70p">${escapeHtml(translate('No Arc entry designated for this lorebook yet.', 'STMemoryBooks_SceneRecon_ArcNone'))}</div>`);
+    } catch (error) {
+        console.warn('STMemoryBooks: Failed to resolve Arc entry status', error);
+        container.innerHTML = DOMPurify.sanitize(`<div class="textWarn">${escapeHtml(translate('Failed to load lorebook.', 'STMemoryBooks_SceneRecon_ArcLoadFailed'))}</div>`);
+    }
+}
+
+async function openArcEntryPicker(lorebookName) {
+    const entries = await getLorebookEntriesForPicker(lorebookName);
+    if (entries.length === 0) {
+        toastr.warning(translate('This lorebook has no entries to mark.', 'STMemoryBooks_SceneRecon_ArcNoEntries'), 'STMemoryBooks');
+        return null;
+    }
+    const options = entries.map(entry => `<option value="${escapeHtml(entry.uid)}">${escapeHtml(entry.title)}</option>`).join('');
+    const content = DOMPurify.sanitize(`
+        <h3>${escapeHtml(translate('Mark Selected Entry as Arc', 'STMemoryBooks_SceneRecon_MarkArc'))}</h3>
+        <div class="world_entry_form_control">
+            <label for="stmb-scenerecon-arc-entry-pick">
+                <span>${escapeHtml(translate('Entry', 'STMemoryBooks_Profile_AlsoIncludeEntry'))}</span>
+                <select id="stmb-scenerecon-arc-entry-pick" class="text_pole">${options}</select>
+            </label>
+        </div>
+    `);
+    const popup = new Popup(content, POPUP_TYPE.TEXT, '', {
+        okButton: translate('Mark as Arc', 'STMemoryBooks_SceneRecon_MarkArcConfirm'),
+        cancelButton: translate('Cancel', 'STMemoryBooks_Cancel'),
+    });
+    markStmbPopup(popup);
+    const result = await popup.show();
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return null;
+    return String(popup.dlg.querySelector('#stmb-scenerecon-arc-entry-pick')?.value || '').trim() || null;
+}
+
+function bindArcEntryControls(popup) {
+    const dlg = popup.dlg;
+    const lorebookSelect = dlg.querySelector('#stmb-scenerecon-arc-lorebook');
+    const statusContainer = dlg.querySelector('#stmb-scenerecon-arc-entry-status');
+    populateLorebookSelect(lorebookSelect);
+    void renderArcEntryStatus(statusContainer, lorebookSelect?.value || '');
+
+    lorebookSelect?.addEventListener('change', () => {
+        void renderArcEntryStatus(statusContainer, lorebookSelect.value);
+    });
+    dlg.querySelector('#stmb-scenerecon-arc-mark')?.addEventListener('click', async () => {
+        const lorebookName = String(lorebookSelect?.value || '').trim();
+        if (!lorebookName) {
+            toastr.warning(translate('Choose a lorebook first.', 'STMemoryBooks_Profile_AlsoIncludeMissingSelection'), 'STMemoryBooks');
+            return;
+        }
+        const uid = await openArcEntryPicker(lorebookName);
+        if (!uid) return;
+        const data = await loadWorldInfo(lorebookName);
+        const result = markEntryAsArc(data, uid);
+        if (!result.success) {
+            toastr.error(result.message, 'STMemoryBooks');
+            return;
+        }
+        await saveWorldInfo(lorebookName, data, true);
+        toastr.success(result.message, 'STMemoryBooks');
+        await renderArcEntryStatus(statusContainer, lorebookName);
+    });
+    dlg.querySelector('#stmb-scenerecon-arc-clear')?.addEventListener('click', async () => {
+        const lorebookName = String(lorebookSelect?.value || '').trim();
+        if (!lorebookName) {
+            toastr.warning(translate('Choose a lorebook first.', 'STMemoryBooks_Profile_AlsoIncludeMissingSelection'), 'STMemoryBooks');
+            return;
+        }
+        const data = await loadWorldInfo(lorebookName);
+        clearArcEntry(data);
+        await saveWorldInfo(lorebookName, data, true);
+        toastr.success(translate('Arc entry binding cleared.', 'STMemoryBooks_SceneRecon_ArcCleared'), 'STMemoryBooks');
+        await renderArcEntryStatus(statusContainer, lorebookName);
+    });
 }
 
 async function openEditContextSetting(parentPopup, key = null) {
@@ -324,6 +511,7 @@ async function refreshContextSettingsPopup(popup) {
 export async function showContextSettingsPopup() {
     const content = DOMPurify.sanitize(`
         <h3>${escapeHtml(translate('Context Settings', 'STMemoryBooks_ContextSettings_Title'))}</h3>
+        ${renderSceneReconciliationSettingsGroup(getSceneReconciliationSettings())}
         <div id="stmb-context-settings-content"></div>
         <div class="buttons_block justifyCenter gap10px whitespacenowrap">
             <button id="stmb-context-new" class="menu_button whitespacenowrap">${escapeHtml(translate('New', 'STMemoryBooks_SidePrompts_New'))}</button>
@@ -340,6 +528,8 @@ export async function showContextSettingsPopup() {
         cancelButton: translate('Close', 'STMemoryBooks_Close'),
     }));
     markStmbPopup(popup);
+    bindSceneReconciliationSettingsControls(popup);
+    bindArcEntryControls(popup);
 
     popup.dlg.querySelector('#stmb-context-new')?.addEventListener('click', async () => {
         await openEditContextSetting(popup, null);

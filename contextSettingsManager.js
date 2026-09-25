@@ -1,9 +1,10 @@
 // Copyright (C) 2024–2026 Aiko Hanasaki
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { getRequestHeaders } from '../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
 import { translate } from '../../../i18n.js';
 import { loadWorldInfo, world_names } from '../../../world-info.js';
+import { extension_settings } from '../../../extensions.js';
 import { FILE_NAMES } from './constants.js';
 import {
     normalizeAdditionalContextEntries,
@@ -15,6 +16,114 @@ const MODULE_NAME = 'STMemoryBooks-ContextSettingsManager';
 const CONTEXT_SETTINGS_FILE = FILE_NAMES.CONTEXT_SETTINGS_FILE;
 
 export const CONTEXT_NONE_KEY = '__none__';
+
+// --- Scene Reconciliation module settings (extension_settings.STMemoryBooks.moduleSettings) ---
+// Unlike the file-backed Context Settings document above, these fields live on the same
+// extension_settings.STMemoryBooks.moduleSettings object every other STMB module reads/writes
+// (see e.g. sidePromptsPopup.js), so they persist via the host app's own settings save, not saveDoc().
+
+const VALID_ARC_RECONCILIATION_MODES = new Set(['auto', 'manual', 'disabled']);
+
+export const SCENE_RECONCILIATION_SETTINGS_DEFAULTS = Object.freeze({
+    sceneReconciliationEnabled: false,
+    arcReconciliationMode: 'auto',
+    characterEntryReconciliationPrompt: null,
+    newCharacterEntryPrompt: null,
+    previewBeforeReconciliationCommit: true,
+    maxNewCharactersPerRun: 10,
+    autoSkipSingleCharacterSuggestions: false,
+});
+
+const NULLABLE_STRING_SETTING_KEYS = new Set(['characterEntryReconciliationPrompt', 'newCharacterEntryPrompt']);
+
+/**
+ * Fills in any missing/invalid Scene Reconciliation fields on `settings.moduleSettings` with
+ * defaults, following the same "if undefined/invalid, assign default" migration-on-load style
+ * used by index.js's own settings normalization. Mutates `settings` in place.
+ *
+ * @param {Object} settings - Shape of extension_settings.STMemoryBooks (has a `moduleSettings` object).
+ * @returns {{changed: boolean}}
+ */
+export function ensureSceneReconciliationSettingsDefaults(settings) {
+    const target = settings && typeof settings === 'object' ? settings : {};
+    if (!target.moduleSettings || typeof target.moduleSettings !== 'object' || Array.isArray(target.moduleSettings)) {
+        target.moduleSettings = {};
+    }
+    const moduleSettings = target.moduleSettings;
+    let changed = false;
+
+    if (typeof moduleSettings.sceneReconciliationEnabled !== 'boolean') {
+        moduleSettings.sceneReconciliationEnabled = SCENE_RECONCILIATION_SETTINGS_DEFAULTS.sceneReconciliationEnabled;
+        changed = true;
+    }
+    if (!VALID_ARC_RECONCILIATION_MODES.has(moduleSettings.arcReconciliationMode)) {
+        moduleSettings.arcReconciliationMode = SCENE_RECONCILIATION_SETTINGS_DEFAULTS.arcReconciliationMode;
+        changed = true;
+    }
+    for (const key of NULLABLE_STRING_SETTING_KEYS) {
+        if (moduleSettings[key] !== null && typeof moduleSettings[key] !== 'string') {
+            moduleSettings[key] = null;
+            changed = true;
+        } else if (typeof moduleSettings[key] === 'string' && !moduleSettings[key].trim()) {
+            moduleSettings[key] = null;
+            changed = true;
+        }
+    }
+    if (typeof moduleSettings.previewBeforeReconciliationCommit !== 'boolean') {
+        moduleSettings.previewBeforeReconciliationCommit = SCENE_RECONCILIATION_SETTINGS_DEFAULTS.previewBeforeReconciliationCommit;
+        changed = true;
+    }
+    const maxNew = Number(moduleSettings.maxNewCharactersPerRun);
+    if (!Number.isFinite(maxNew) || maxNew < 1) {
+        moduleSettings.maxNewCharactersPerRun = SCENE_RECONCILIATION_SETTINGS_DEFAULTS.maxNewCharactersPerRun;
+        changed = true;
+    } else {
+        const clamped = Math.min(50, Math.max(1, Math.round(maxNew)));
+        if (clamped !== moduleSettings.maxNewCharactersPerRun) {
+            moduleSettings.maxNewCharactersPerRun = clamped;
+            changed = true;
+        }
+    }
+    if (typeof moduleSettings.autoSkipSingleCharacterSuggestions !== 'boolean') {
+        moduleSettings.autoSkipSingleCharacterSuggestions = SCENE_RECONCILIATION_SETTINGS_DEFAULTS.autoSkipSingleCharacterSuggestions;
+        changed = true;
+    }
+
+    return { changed };
+}
+
+/**
+ * Returns extension_settings.STMemoryBooks.moduleSettings, creating/defaulting it first if needed.
+ * @returns {Object}
+ */
+export function getSceneReconciliationSettings() {
+    if (!extension_settings.STMemoryBooks || typeof extension_settings.STMemoryBooks !== 'object') {
+        extension_settings.STMemoryBooks = { moduleSettings: {} };
+    }
+    ensureSceneReconciliationSettingsDefaults(extension_settings.STMemoryBooks);
+    return extension_settings.STMemoryBooks.moduleSettings;
+}
+
+/**
+ * Validates and writes a single Scene Reconciliation setting, then persists it via
+ * saveSettingsDebounced() (same pattern as sidePromptsPopup.js's direct moduleSettings writes).
+ *
+ * @param {keyof SCENE_RECONCILIATION_SETTINGS_DEFAULTS} key
+ * @param {*} value
+ * @returns {*} The stored (possibly normalized/clamped) value.
+ */
+export function updateSceneReconciliationSetting(key, value) {
+    if (!Object.prototype.hasOwnProperty.call(SCENE_RECONCILIATION_SETTINGS_DEFAULTS, key)) {
+        throw new Error(`Unknown Scene Reconciliation setting "${key}"`);
+    }
+    const moduleSettings = getSceneReconciliationSettings();
+    moduleSettings[key] = NULLABLE_STRING_SETTING_KEYS.has(key) && typeof value === 'string' && !value.trim()
+        ? null
+        : value;
+    ensureSceneReconciliationSettingsDefaults(extension_settings.STMemoryBooks);
+    saveSettingsDebounced();
+    return moduleSettings[key];
+}
 
 let cachedDoc = null;
 

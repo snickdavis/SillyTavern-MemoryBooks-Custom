@@ -20,6 +20,8 @@ import { i18n } from './i18nHelpers.js';
 import {
     applyFixedSequenceNumber,
     hasSequenceNumberPlaceholder,
+    applyRegenerationReplacement,
+    getEntryByUid,
 } from './memoryRegeneration.js';
 import { getRequestHeaders, eventSource, event_types } from '../../../../script.js';
 import { SIDE_PROMPT_HISTORY_KEY, formatSidePromptVersionTitle, resolveSidePromptHistory, validateSidePromptHistoryRequest } from './sidePromptHistory.js';
@@ -272,6 +274,19 @@ export const DEFAULT_LOREBOOK_ENTRY_SETTINGS = Object.freeze({
     preventRecursion: false,
     delayUntilRecursion: false,
     ignoreBudget: false,
+});
+
+/** Scene Reconciliation: default lorebook-level metadata fields (stamped onto lorebookData). */
+export const DEFAULT_ARC_LOREBOOK_METADATA = Object.freeze({
+    STMB_arcTrackingEnabled: false,
+    STMB_arcEntryUid: null,
+});
+
+/** Scene Reconciliation: default entry-level metadata fields. */
+export const DEFAULT_CHARACTER_ENTRY_METADATA = Object.freeze({
+    STMB_isArcEntry: false,
+    STMB_characterName: null,
+    STMB_characterEntryType: 'character',
 });
 
 const CONTROLLED_WORLD_INFO_DEFAULT_FIELDS = [
@@ -587,6 +602,13 @@ export async function addMemoryToLorebook(memoryResult, lorebookValidation, opti
             }
             : memoryResult;
 
+        if (lorebookValidation.data.STMB_arcTrackingEnabled === undefined) {
+            lorebookValidation.data.STMB_arcTrackingEnabled = DEFAULT_ARC_LOREBOOK_METADATA.STMB_arcTrackingEnabled;
+        }
+        if (lorebookValidation.data.STMB_arcEntryUid === undefined) {
+            lorebookValidation.data.STMB_arcEntryUid = DEFAULT_ARC_LOREBOOK_METADATA.STMB_arcEntryUid;
+        }
+
         const newEntry = createWorldInfoEntry(lorebookValidation.name, lorebookValidation.data);
 
         if (!newEntry) {
@@ -689,6 +711,11 @@ function populateLorebookEntry(entry, memoryResult, entryTitle, lorebookSettings
     entry.content = memoryResult.content;
     entry.key = memoryResult.suggestedKeys || [];
     entry.comment = entryTitle;
+
+    // Scene Reconciliation entry-level metadata defaults
+    entry.STMB_isArcEntry = DEFAULT_CHARACTER_ENTRY_METADATA.STMB_isArcEntry;
+    entry.STMB_characterName = DEFAULT_CHARACTER_ENTRY_METADATA.STMB_characterName;
+    entry.STMB_characterEntryType = DEFAULT_CHARACTER_ENTRY_METADATA.STMB_characterEntryType;
     
     // Extract order number from title for auto-numbering
     const orderNumber = extractNumberFromTitle(entryTitle) || 1;
@@ -1530,4 +1557,473 @@ export async function upsertLorebookEntryByTitle(lorebookName, lorebookData, tit
     }
 
     return { uid: entry.uid, created };
+}
+
+// --- Scene Reconciliation: entry identification/matching + write-back ---
+// See sceneReconciliation.js for the orchestration layer that produces the
+// proposals consumed by the write-back functions below.
+
+/**
+ * Marks a lorebook entry as the canonical Arc entry for Scene Reconciliation.
+ * Unflags any previously-marked Arc entry so there is only ever one canonical
+ * Arc entry per lorebook. Does NOT save - callers are responsible for persisting
+ * via saveWorldInfo() (e.g. as part of a larger batch of changes).
+ *
+ * @param {Object} lorebookData
+ * @param {number|string} entryUid
+ * @returns {{success: boolean, message: string}}
+ */
+export function markEntryAsArc(lorebookData, entryUid) {
+    const entry = getEntryByUid(lorebookData, entryUid);
+    if (!entry) {
+        return {
+            success: false,
+            message: i18n('addlore.arc.result.markNotFound', 'Could not find an entry with uid "{{uid}}" to mark as the Arc entry', { uid: entryUid }),
+        };
+    }
+
+    for (const other of Object.values(lorebookData?.entries || {})) {
+        if (other !== entry && other?.STMB_isArcEntry === true) {
+            other.STMB_isArcEntry = false;
+        }
+    }
+
+    entry.STMB_isArcEntry = true;
+    entry.STMB_characterEntryType = 'arc';
+    lorebookData.STMB_arcEntryUid = String(entry.uid);
+    lorebookData.STMB_arcTrackingEnabled = true;
+
+    return {
+        success: true,
+        message: i18n('addlore.arc.result.marked', 'Entry "{{title}}" marked as the Arc entry', { title: entry.comment || '' }),
+    };
+}
+
+/**
+ * Dual-path lookup for the canonical Arc entry.
+ *
+ * Seam note: `markEntryAsArc()` writes STMB_arcEntryUid/STMB_arcTrackingEnabled
+ * directly onto `lorebookData` (there is no separate lorebook-metadata store yet).
+ * `lorebookMetadata` is accepted as its own parameter so a future settings/UI layer
+ * can supply a different metadata source without changing this signature; callers
+ * that have nothing else to pass should pass `lorebookData` itself.
+ *
+ * @param {Object} lorebookData
+ * @param {Object} [lorebookMetadata] - e.g. {STMB_arcEntryUid}. Defaults to {} (flag-scan only).
+ * @returns {{entry: Object|null, source: 'metadata'|'flag'|'not_found'}}
+ */
+export function getArcEntry(lorebookData, lorebookMetadata = {}) {
+    const arcEntryUid = lorebookMetadata?.STMB_arcEntryUid;
+    if (arcEntryUid !== undefined && arcEntryUid !== null && arcEntryUid !== '') {
+        const entry = getEntryByUid(lorebookData, arcEntryUid);
+        if (entry) {
+            return { entry, source: 'metadata' };
+        }
+        console.warn(i18n('addlore.arc.log.staleUid', `${MODULE_NAME}: STMB_arcEntryUid "{{uid}}" did not resolve to an entry; falling back to flag scan`, { uid: arcEntryUid }));
+    }
+
+    const flagged = Object.values(lorebookData?.entries || {}).find(entry => entry?.STMB_isArcEntry === true);
+    if (flagged) {
+        return { entry: flagged, source: 'flag' };
+    }
+
+    return { entry: null, source: 'not_found' };
+}
+
+/**
+ * Clears the canonical Arc entry binding for a lorebook: unflags the currently
+ * designated entry (if any) and resets lorebook-level Arc metadata. Does NOT
+ * save - callers are responsible for persisting via saveWorldInfo().
+ *
+ * @param {Object} lorebookData
+ * @returns {{success: boolean, message: string}}
+ */
+export function clearArcEntry(lorebookData) {
+    const { entry } = getArcEntry(lorebookData, lorebookData);
+    if (entry) {
+        entry.STMB_isArcEntry = false;
+    }
+    lorebookData.STMB_arcEntryUid = null;
+    lorebookData.STMB_arcTrackingEnabled = false;
+
+    return {
+        success: true,
+        message: i18n('addlore.arc.result.cleared', 'Arc entry binding cleared'),
+    };
+}
+
+/**
+ * 3-tier character entry lookup:
+ *  1. canonical  - exact match on entry.STMB_characterName
+ *  2. filter     - case/whitespace-insensitive match against entry.characterFilter.names[0]
+ *  3. heuristic  - weak match: entry.comment contains the character name (logs a warning)
+ *
+ * @param {Object} lorebookData
+ * @param {string} characterName
+ * @returns {{entry: Object|null, source: 'canonical'|'filter'|'heuristic'|'not_found'}}
+ */
+export function getCharacterEntry(lorebookData, characterName) {
+    const name = String(characterName || '').trim();
+    if (!name || !lorebookData?.entries) {
+        return { entry: null, source: 'not_found' };
+    }
+
+    const entries = Object.values(lorebookData.entries);
+
+    const canonical = entries.find(entry => String(entry?.STMB_characterName || '').trim() === name);
+    if (canonical) {
+        return { entry: canonical, source: 'canonical' };
+    }
+
+    const normalizedName = name.toLowerCase();
+    const filterMatch = entries.find(entry => {
+        const filterNames = Array.isArray(entry?.characterFilter?.names) ? entry.characterFilter.names : [];
+        return String(filterNames[0] || '').trim().toLowerCase() === normalizedName;
+    });
+    if (filterMatch) {
+        return { entry: filterMatch, source: 'filter' };
+    }
+
+    const heuristicMatch = entries.find(entry => String(entry?.comment || '').toLowerCase().includes(normalizedName));
+    if (heuristicMatch) {
+        console.warn(i18n(
+            'addlore.character.log.heuristicMatch',
+            `${MODULE_NAME}: Matched character "{{name}}" to entry "{{title}}" using a weak comment-substring heuristic; consider calling setCharacterEntryBinding() to bind it explicitly`,
+            { name, title: heuristicMatch.comment || '' },
+        ));
+        return { entry: heuristicMatch, source: 'heuristic' };
+    }
+
+    return { entry: null, source: 'not_found' };
+}
+
+/**
+ * Binds an entry to a character name for future getCharacterEntry() canonical lookups.
+ *
+ * @param {Object} entry
+ * @param {string} characterName
+ * @returns {Object} The mutated entry
+ */
+export function setCharacterEntryBinding(entry, characterName) {
+    if (!entry) {
+        return entry;
+    }
+    entry.STMB_characterName = String(characterName || '').trim() || null;
+    entry.STMB_characterEntryType = 'character';
+    return entry;
+}
+
+/**
+ * Categorizes scene character names against the lorebook using getCharacterEntry().
+ *
+ * @param {string[]} characterNames
+ * @param {Object} lorebookData
+ * @param {Object} [options]
+ * @param {Array<string|RegExp>} [options.excludePatterns] - Names/patterns to exclude (e.g. user name, narrator markers)
+ * @returns {{existing: Array<{name:string, entry:Object}>, new: Array<{name:string}>, excluded: Array<{name:string, reason:string}>, metadata: Object}}
+ */
+export function filterCharactersForReconciliation(characterNames, lorebookData, options = {}) {
+    const excludePatterns = Array.isArray(options.excludePatterns) ? options.excludePatterns : [];
+    const names = Array.isArray(characterNames) ? characterNames : [];
+
+    const isExcluded = (name) => excludePatterns.some(pattern => {
+        if (pattern instanceof RegExp) {
+            return pattern.test(name);
+        }
+        return String(pattern || '').trim().toLowerCase() === name.toLowerCase();
+    });
+
+    const existing = [];
+    const newCharacters = [];
+    const excluded = [];
+    const seen = new Set();
+
+    for (const raw of names) {
+        const name = String(raw || '').trim();
+        if (!name || seen.has(name)) {
+            continue;
+        }
+        seen.add(name);
+
+        if (isExcluded(name)) {
+            excluded.push({ name, reason: 'excludePattern' });
+            continue;
+        }
+
+        const { entry } = getCharacterEntry(lorebookData, name);
+        if (entry) {
+            existing.push({ name, entry });
+        } else {
+            newCharacters.push({ name });
+        }
+    }
+
+    return {
+        existing,
+        new: newCharacters,
+        excluded,
+        metadata: {
+            totalInput: names.length,
+            totalConsidered: seen.size,
+            existingCount: existing.length,
+            newCount: newCharacters.length,
+            excludedCount: excluded.length,
+        },
+    };
+}
+
+/**
+ * Applies a reconciled Arc entry update in place, preserving uid/other fields
+ * via applyRegenerationReplacement(). Saves via saveWorldInfo().
+ *
+ * @param {string} lorebookName
+ * @param {Object} lorebookData
+ * @param {Object} arcReconciliationData - {entryUid?, title?, content, keywords?}
+ * @param {Object} [options]
+ * @param {boolean} [options.contentOnly=false] - Only replace content, leave title/keywords untouched
+ * @param {boolean} [options.refreshEditor=true]
+ * @param {boolean} [options.showNotification]
+ * @returns {Promise<{success: boolean, uid?: number, message: string, error?: string}>}
+ */
+export async function upsertArcEntry(lorebookName, lorebookData, arcReconciliationData, options = {}) {
+    const settings = extension_settings.STMemoryBooks || {};
+    try {
+        const targetUid = arcReconciliationData?.entryUid;
+        const entry = (targetUid !== undefined && targetUid !== null)
+            ? getEntryByUid(lorebookData, targetUid)
+            : getArcEntry(lorebookData, lorebookData).entry;
+
+        if (!entry) {
+            throw new Error(i18n('addlore.arc.errors.entryNotFound', 'No Arc entry found to update'));
+        }
+
+        applyRegenerationReplacement(entry, {
+            formattedTitle: arcReconciliationData?.title ?? entry.comment,
+            content: arcReconciliationData?.content ?? entry.content,
+            keywords: arcReconciliationData?.keywords ?? entry.key,
+        }, { contentOnly: options.contentOnly === true, lorebookData });
+
+        entry.STMB_isArcEntry = true;
+        entry.STMB_characterEntryType = 'arc';
+        lorebookData.STMB_arcEntryUid = String(entry.uid);
+        lorebookData.STMB_arcTrackingEnabled = true;
+
+        await saveWorldInfo(lorebookName, lorebookData, true);
+        if (options.refreshEditor !== false) {
+            await Promise.resolve(reloadEditor(lorebookName));
+        }
+
+        const message = i18n('addlore.arc.result.updated', 'Arc entry updated in "{{lorebookName}}"', { lorebookName });
+        if (options.showNotification !== false && settings.moduleSettings?.showNotifications !== false) {
+            toastr.success(message, i18n('addlore.toast.title', 'STMemoryBooks'));
+        }
+
+        return { success: true, uid: entry.uid, message };
+    } catch (error) {
+        console.error(i18n('addlore.arc.log.updateFailed', `${MODULE_NAME}: Failed to upsert Arc entry:`), error);
+        const message = i18n('addlore.arc.result.updateFailed', 'Failed to update Arc entry: {{message}}', { message: error.message });
+        if (options.showNotification !== false && settings.moduleSettings?.showNotifications !== false) {
+            toastr.error(message, i18n('addlore.toast.title', 'STMemoryBooks'));
+        }
+        return { success: false, error: error.message, message };
+    }
+}
+
+/**
+ * Applies a reconciled character entry update using applyRegenerationReplacement()
+ * (from memoryRegeneration.js) to preserve uid. Saves via saveWorldInfo().
+ *
+ * @param {string} lorebookName
+ * @param {Object} lorebookData
+ * @param {string} characterName
+ * @param {Object} reconciliationData - {entryUid?, title?, content, keywords?}
+ * @param {Object} [options]
+ * @param {boolean} [options.contentOnly=false]
+ * @param {boolean} [options.refreshEditor=true]
+ * @param {boolean} [options.showNotification]
+ * @returns {Promise<{success: boolean, uid?: number, message: string, error?: string}>}
+ */
+export async function upsertCharacterEntry(lorebookName, lorebookData, characterName, reconciliationData, options = {}) {
+    const settings = extension_settings.STMemoryBooks || {};
+    try {
+        const targetUid = reconciliationData?.entryUid;
+        const entry = (targetUid !== undefined && targetUid !== null)
+            ? getEntryByUid(lorebookData, targetUid)
+            : getCharacterEntry(lorebookData, characterName).entry;
+
+        if (!entry) {
+            throw new Error(i18n('addlore.character.errors.entryNotFound', 'No existing entry found for character "{{name}}"', { name: characterName }));
+        }
+
+        applyRegenerationReplacement(entry, {
+            formattedTitle: reconciliationData?.title ?? entry.comment,
+            content: reconciliationData?.content ?? entry.content,
+            keywords: reconciliationData?.keywords ?? entry.key,
+        }, { contentOnly: options.contentOnly === true, lorebookData });
+
+        setCharacterEntryBinding(entry, characterName);
+
+        await saveWorldInfo(lorebookName, lorebookData, true);
+        if (options.refreshEditor !== false) {
+            await Promise.resolve(reloadEditor(lorebookName));
+        }
+
+        const message = i18n('addlore.character.result.updated', 'Character entry for "{{name}}" updated in "{{lorebookName}}"', { name: characterName, lorebookName });
+        if (options.showNotification !== false && settings.moduleSettings?.showNotifications !== false) {
+            toastr.success(message, i18n('addlore.toast.title', 'STMemoryBooks'));
+        }
+
+        return { success: true, uid: entry.uid, message };
+    } catch (error) {
+        console.error(i18n('addlore.character.log.updateFailed', `${MODULE_NAME}: Failed to upsert character entry for "{{name}}":`, { name: characterName }), error);
+        const message = i18n('addlore.character.result.updateFailed', 'Failed to update character entry: {{message}}', { message: error.message });
+        if (options.showNotification !== false && settings.moduleSettings?.showNotifications !== false) {
+            toastr.error(message, i18n('addlore.toast.title', 'STMemoryBooks'));
+        }
+        return { success: false, error: error.message, message };
+    }
+}
+
+/**
+ * Creates a brand-new character entry via createWorldInfoEntry() + applyLorebookEntrySettings(),
+ * tags it via setCharacterEntryBinding(), and marks it as an STMemoryBooks entry
+ * (applyLorebookEntrySettings() already sets entry.stmemorybooks = true). Saves via saveWorldInfo().
+ *
+ * @param {string} lorebookName
+ * @param {Object} lorebookData
+ * @param {string} characterName
+ * @param {Object} profileData - {title?, content, keywords?}
+ * @param {Object} [options]
+ * @param {Object} [options.lorebookSettings] - Forwarded to applyLorebookEntrySettings()
+ * @param {number} [options.orderNumber]
+ * @param {Object} [options.entryOverrides] - Extra fields to set on the new entry
+ * @param {boolean} [options.refreshEditor=true]
+ * @param {boolean} [options.showNotification]
+ * @returns {Promise<{success: boolean, uid?: number, entryTitle?: string, message: string, error?: string}>}
+ */
+export async function createNewCharacterEntry(lorebookName, lorebookData, characterName, profileData, options = {}) {
+    const settings = extension_settings.STMemoryBooks || {};
+    try {
+        const entry = createWorldInfoEntry(lorebookName, lorebookData);
+        if (!entry) {
+            throw new Error(i18n('addlore.errors.createEntryFailed', 'Failed to create new lorebook entry'));
+        }
+
+        const title = sanitizeTitle(String(profileData?.title || characterName || ''));
+        entry.comment = title;
+        entry.content = profileData?.content != null ? String(profileData.content) : '';
+        entry.key = Array.isArray(profileData?.keywords) ? [...profileData.keywords] : [];
+
+        applyLorebookEntrySettings(entry, options.lorebookSettings || {}, {
+            orderNumber: options.orderNumber,
+            orderNumberLabel: 'character',
+            showOrderClampNotification: !!options.showOrderClampNotification,
+        });
+
+        setCharacterEntryBinding(entry, characterName);
+
+        if (options.entryOverrides && typeof options.entryOverrides === 'object') {
+            for (const [key, value] of Object.entries(options.entryOverrides)) {
+                entry[key] = value;
+            }
+        }
+
+        await saveWorldInfo(lorebookName, lorebookData, true);
+        if (options.refreshEditor !== false) {
+            await Promise.resolve(reloadEditor(lorebookName));
+        }
+
+        const message = i18n('addlore.character.result.created', 'New character entry "{{title}}" created in "{{lorebookName}}"', { title, lorebookName });
+        if (options.showNotification !== false && settings.moduleSettings?.showNotifications !== false) {
+            toastr.success(message, i18n('addlore.toast.title', 'STMemoryBooks'));
+        }
+
+        return { success: true, uid: entry.uid, entryTitle: title, message };
+    } catch (error) {
+        console.error(i18n('addlore.character.log.createFailed', `${MODULE_NAME}: Failed to create new character entry:`), error);
+        const message = i18n('addlore.character.result.createFailed', 'Failed to create character entry: {{message}}', { message: error.message });
+        if (options.showNotification !== false && settings.moduleSettings?.showNotifications !== false) {
+            toastr.error(message, i18n('addlore.toast.title', 'STMemoryBooks'));
+        }
+        return { success: false, error: error.message, message };
+    }
+}
+
+/**
+ * Batches all approved Scene Reconciliation changes (Arc update, character updates,
+ * and approved new-character creates) into a single upsertLorebookEntriesBatch() call
+ * plus one save. Existing entries are matched/updated by their CURRENT title (their
+ * title is not renamed by this batch path); use upsertArcEntry()/upsertCharacterEntry()
+ * directly if a reconciliation also needs to rename an entry's title.
+ *
+ * @param {string} lorebookName
+ * @param {Object} lorebookData
+ * @param {Object} reconciliationResult - Output of reconcileSceneWithLorebook() (sceneReconciliation.js)
+ * @param {Object} [options]
+ * @param {boolean} [options.includeArc=true]
+ * @param {boolean} [options.refreshEditor=true]
+ * @returns {Promise<{createdCount: number, updatedCount: number, errors: string[]}>}
+ */
+export async function applySceneReconciliationChanges(lorebookName, lorebookData, reconciliationResult, options = {}) {
+    const errors = [];
+    const items = [];
+
+    const arcOperation = reconciliationResult?.arcOperation;
+    if (options.includeArc !== false && arcOperation?.status === 'processed' && arcOperation.entry) {
+        items.push({
+            title: arcOperation.entry.comment,
+            content: arcOperation.proposedContent ?? arcOperation.entry.content,
+            metadataUpdates: { STMB_isArcEntry: true, STMB_characterEntryType: 'arc' },
+        });
+        lorebookData.STMB_arcEntryUid = String(arcOperation.entry.uid);
+        lorebookData.STMB_arcTrackingEnabled = true;
+    }
+
+    for (const charOp of Array.isArray(reconciliationResult?.characterOperations) ? reconciliationResult.characterOperations : []) {
+        if (charOp?.status !== 'processed' || !charOp.entry) {
+            continue;
+        }
+        items.push({
+            title: charOp.entry.comment,
+            content: charOp.proposedContent ?? charOp.entry.content,
+            metadataUpdates: { STMB_characterName: charOp.characterName, STMB_characterEntryType: 'character' },
+        });
+    }
+
+    for (const proposal of Array.isArray(reconciliationResult?.newCharacterProposals) ? reconciliationResult.newCharacterProposals : []) {
+        if (proposal?.userApproved !== true) {
+            continue;
+        }
+        const content = proposal.userEdits?.content ?? proposal.proposedContent ?? '';
+        const title = sanitizeTitle(String(proposal.userEdits?.title ?? proposal.proposedTitle ?? proposal.characterName ?? ''));
+        const keywords = proposal.userEdits?.keywords ?? proposal.proposedKeywords ?? [];
+        items.push({
+            title,
+            content,
+            defaults: { vectorized: true, selective: true, order: 100, position: 0 },
+            entryOverrides: { key: Array.isArray(keywords) ? [...keywords] : [] },
+            metadataUpdates: { STMB_characterName: proposal.characterName, STMB_characterEntryType: 'character', stmemorybooks: true },
+        });
+    }
+
+    if (items.length === 0) {
+        return { createdCount: 0, updatedCount: 0, errors };
+    }
+
+    let createdCount = 0;
+    let updatedCount = 0;
+    try {
+        const results = await upsertLorebookEntriesBatch(lorebookName, lorebookData, items, {
+            refreshEditor: options.refreshEditor !== false,
+        });
+        for (const result of results) {
+            if (result.created) createdCount++;
+            else updatedCount++;
+        }
+    } catch (error) {
+        console.error(i18n('addlore.reconciliation.log.batchFailed', `${MODULE_NAME}: applySceneReconciliationChanges batch upsert failed:`), error);
+        errors.push(error.message);
+    }
+
+    return { createdCount, updatedCount, errors };
 }
