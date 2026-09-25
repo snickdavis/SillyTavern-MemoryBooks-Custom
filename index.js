@@ -6951,16 +6951,24 @@ function getSceneReconciliationModuleSettings(settings) {
 }
 
 /**
+ * Returns null when Scene Reconciliation is eligible, otherwise a machine-readable reason code
+ * ("disabled" | "noLorebook" | "noArcEntry") so callers can surface a precise error message.
+ */
+function getSceneReconciliationIneligibilityReason(settings, lorebookValidation) {
+  const recon = getSceneReconciliationModuleSettings(settings);
+  if (!recon.enabled) return "disabled";
+  if (!lorebookValidation?.valid || !lorebookValidation?.name || !lorebookValidation?.data) return "noLorebook";
+  if (recon.arcReconciliationMode === "manual") return null;
+  const { entry } = getArcEntry(lorebookValidation.data, lorebookValidation.data);
+  return entry ? null : "noArcEntry";
+}
+
+/**
  * Scene Reconciliation is only offered when the feature is on, a lorebook is actually bound,
  * and either the Arc entry can be resolved or the mode is "manual" (no Arc entry required).
  */
 function isSceneReconciliationEligible(settings, lorebookValidation) {
-  const recon = getSceneReconciliationModuleSettings(settings);
-  if (!recon.enabled) return false;
-  if (!lorebookValidation?.valid || !lorebookValidation?.name || !lorebookValidation?.data) return false;
-  if (recon.arcReconciliationMode === "manual") return true;
-  const { entry } = getArcEntry(lorebookValidation.data, lorebookValidation.data);
-  return !!entry;
+  return getSceneReconciliationIneligibilityReason(settings, lorebookValidation) === null;
 }
 
 /**
@@ -7317,7 +7325,34 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
     // async infra), so it intentionally bypasses the job queue and runs inline even when Jobs
     // mode is active for regular memory creation. Only gated by eligibility and explicit opt-out
     // (batch callers like /stmb-catchup pass allowSceneReconciliationPrompt: false to stay non-interactive).
+    if (options.forceReconciliationChoice === "reconcile") {
+      // Explicit request to skip the choice popup and reconcile directly (from the Scene
+      // Reconciliation settings popup's "Start Reconciliation" button). Never falls through to
+      // normal creation on ineligibility - the user asked specifically to reconcile.
+      const ineligibleReason = getSceneReconciliationIneligibilityReason(settings, lorebookValidation);
+      if (ineligibleReason) {
+        const message = {
+          disabled: translate(
+            "Scene Reconciliation is not enabled. Turn it on in Scene Reconciliation settings first.",
+            "STMemoryBooks_SceneReconciliation_ForceIneligible_Disabled",
+          ),
+          noLorebook: translate(
+            "No lorebook is bound. Bind or select a Memory Book before reconciling.",
+            "STMemoryBooks_SceneReconciliation_ForceIneligible_NoLorebook",
+          ),
+          noArcEntry: translate(
+            "No Arc entry could be found to reconcile against. Designate an Arc entry first, or switch Arc Reconciliation Mode to manual.",
+            "STMemoryBooks_SceneReconciliation_ForceIneligible_NoArcEntry",
+          ),
+        }[ineligibleReason];
+        toastr.error(message, "STMemoryBooks");
+        isProcessingMemory = false;
+        return false;
+      }
+      return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings);
+    }
     if (
+      options.forceReconciliationChoice !== "createNew" &&
       options.allowSceneReconciliationPrompt !== false &&
       isSceneReconciliationEligible(settings, lorebookValidation)
     ) {
@@ -11595,6 +11630,17 @@ async function showSceneReconciliationSettingsPopup() {
       allowVerticalScrolling: true,
       cancelButton: translate("Close", "STMemoryBooks_Close"),
       okButton: false,
+      customButtons: [
+        {
+          text: "🧠 " + translate("Start Reconciliation", "STMemoryBooks_SceneReconciliation_StartButton"),
+          result: null,
+          classes: ["menu_button"],
+          action: async () => {
+            popup.completeCancelled();
+            await initiateMemoryCreation(null, { forceReconciliationChoice: "reconcile" });
+          },
+        },
+      ],
       onClose: handleSettingsFormPopupClose,
     });
     markStmbPopup(popup);
