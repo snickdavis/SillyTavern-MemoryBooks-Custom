@@ -7111,9 +7111,12 @@ async function runSceneReconciliationFlow(sceneData, lorebookValidation, effecti
 
   // Non-interactive batch callers (allowSceneReconciliationPrompt: false, e.g. /stmb-catchup)
   // skip this popup too and just proceed with no manually-named new characters.
-  const manualNewCharacterNames = allowSceneReconciliationPrompt
-    ? await promptForNewCharacterNames()
-    : [];
+  let manualNewCharacterNames = [];
+  if (allowSceneReconciliationPrompt) {
+    console.log("STMemoryBooks: Prompting for new character names...");
+    manualNewCharacterNames = await promptForNewCharacterNames();
+    console.log("STMemoryBooks: New character names prompt result:", manualNewCharacterNames);
+  }
 
   toastr.info(
     translate("Reconciling scene with existing entries...", "STMemoryBooks_SceneReconciliation_Working"),
@@ -7163,7 +7166,7 @@ async function runSceneReconciliationFlow(sceneData, lorebookValidation, effecti
       lorebookName: lorebookValidation.name,
       lorebookData: lorebookValidation.data,
       profileSettings,
-      manualNewCharacterNames,
+      options: { manualNewCharacterNames },
     });
   } catch (error) {
     toastr.clear();
@@ -7385,9 +7388,10 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
       return false;
     }
 
-    // Close settings popup if open
+    // Close settings popup if open. Awaited (matching the pendingProgress button's pattern) so a
+    // subsequent popup.show() doesn't race the previous popup's async close/teardown.
     if (currentPopupInstance) {
-      currentPopupInstance.completeCancelled();
+      await currentPopupInstance.completeCancelled();
       currentPopupInstance = null;
     }
 
@@ -11706,7 +11710,7 @@ async function showSceneReconciliationSettingsPopup() {
           result: null,
           classes: ["menu_button"],
           action: async () => {
-            popup.completeCancelled();
+            await popup.completeCancelled();
             await initiateMemoryCreation(null, { forceReconciliationChoice: "reconcile" });
           },
         },
