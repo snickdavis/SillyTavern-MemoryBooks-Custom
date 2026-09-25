@@ -55,6 +55,8 @@ import {
   normalizeLorebookEntrySettings,
   applySceneReconciliationChanges,
   getArcEntry,
+  markEntryAsArc,
+  clearArcEntry,
 } from "./addlore.js";
 import { reconcileSceneWithLorebook } from "./sceneReconciliation.js";
 import { autoCreateLorebook } from "./autocreate.js";
@@ -125,6 +127,7 @@ import {
   markStmbPopup,
   throwIfStmbStopped,
   withGoBackButton,
+  getLorebookEntryDisplayName,
 } from "./utils.js";
 import * as SummaryPromptManager from "./summaryPromptManager.js";
 import {
@@ -176,13 +179,16 @@ import {
 import {
   CONTEXT_NONE_KEY,
   getContextSetting,
+  getSceneReconciliationSettings,
   migrateProfileAdditionalContext,
   resolveContextSettingEntries,
   resolveContextSettingEntriesFromRefs,
+  updateSceneReconciliationSetting,
 } from "./contextSettingsManager.js";
 import {
   clearChatContextSettingKey,
   getChatContextSettingKey,
+  getLorebookEntriesForPicker,
   hasValidChatContextSettingSelection,
   maybePromptForMigratedContextSetting,
   showContextSettingsPopup,
@@ -7783,6 +7789,136 @@ function renderManualGroupLorebookBindings(container, stmbData) {
 }
 
 /**
+ * Small entry-title picker popup, modeled on showLorebookSelectionPopup's
+ * single-select-dropdown pattern.
+ * @param {{uid: string, title: string}[]} entries
+ * @returns {Promise<string|null>} Selected entry uid, or null if cancelled.
+ */
+async function showArcEntrySelectionPopup(entries) {
+  const options = entries
+    .map((entry) => `<option value="${escapeHtml(entry.uid)}">${escapeHtml(entry.title)}</option>`)
+    .join("");
+  const popupContent = `
+    <h4>${escapeHtml(translate("Mark Selected Entry as Arc", "STMemoryBooks_SceneRecon_MarkAsArc"))}</h4>
+    <div class="world_entry_form_control">
+      <select id="stmb-arc-entry-picker" class="text_pole">
+        ${options}
+      </select>
+    </div>
+  `;
+  const popup = new Popup(popupContent, POPUP_TYPE.TEXT, "", {
+    okButton: translate("Select", "STMemoryBooks_SelectManualLorebook"),
+    cancelButton: translate("Cancel", "STMemoryBooks_Cancel"),
+  });
+  markStmbPopup(popup);
+  const result = await popup.show();
+  if (result !== POPUP_RESULT.AFFIRMATIVE) return null;
+  return popup.dlg.querySelector("#stmb-arc-entry-picker")?.value || null;
+}
+
+/**
+ * Renders the Arc Entry designation status + action buttons for the currently
+ * resolved lorebook, mirroring the manual-lorebook buttons block in
+ * populateInlineButtons(). Re-render is triggered after every mutation instead
+ * of patching the DOM in place, matching refreshPopupContent()'s convention.
+ * @param {HTMLElement} container - `#stmb-arc-entry-status`
+ * @param {HTMLElement} buttonsContainer - `#stmb-arc-entry-buttons`
+ * @param {string|null} lorebookName
+ */
+async function renderArcEntrySection(container, buttonsContainer, lorebookName) {
+  if (!container || !buttonsContainer) return;
+
+  if (!lorebookName) {
+    container.textContent = translate("No lorebook selected", "STMemoryBooks_NoneSelected");
+    buttonsContainer.innerHTML = "";
+    return;
+  }
+
+  let data;
+  try {
+    data = await loadWorldInfo(lorebookName);
+  } catch (error) {
+    console.error("STMemoryBooks: Error loading lorebook for Arc entry status:", error);
+    data = null;
+  }
+
+  if (!data) {
+    container.textContent = translate("No lorebook selected", "STMemoryBooks_NoneSelected");
+    buttonsContainer.innerHTML = "";
+    return;
+  }
+
+  const { entry } = getArcEntry(data, data);
+  container.textContent = entry
+    ? tr(
+        "STMemoryBooks_SceneRecon_ArcEntryStatus",
+        "Arc entry: {{title}} (uid {{uid}})",
+        { title: getLorebookEntryDisplayName(entry, entry.uid), uid: entry.uid },
+      )
+    : translate(
+        "No Arc entry designated for this lorebook yet.",
+        "STMemoryBooks_SceneRecon_NoArcEntry",
+      );
+
+  buttonsContainer.innerHTML = "";
+
+  const markButton = document.createElement("div");
+  markButton.className = "menu_button interactable whitespacenowrap";
+  markButton.textContent = "📌 " + translate("Mark Selected Entry as Arc", "STMemoryBooks_SceneRecon_MarkAsArc");
+  markButton.addEventListener("click", async () => {
+    try {
+      const entries = await getLorebookEntriesForPicker(lorebookName);
+      if (!entries.length) {
+        toastr.warning(
+          translate("This lorebook has no entries to select from.", "STMemoryBooks_SceneRecon_NoEntriesToSelect"),
+          "STMemoryBooks",
+        );
+        return;
+      }
+      const selectedUid = await showArcEntrySelectionPopup(entries);
+      if (!selectedUid) return;
+
+      const freshData = await loadWorldInfo(lorebookName);
+      const result = markEntryAsArc(freshData, selectedUid);
+      if (!result.success) {
+        toastr.error(result.message, "STMemoryBooks");
+        return;
+      }
+      await saveWorldInfo(lorebookName, freshData, true);
+      toastr.success(result.message, "STMemoryBooks");
+      await renderArcEntrySection(container, buttonsContainer, lorebookName);
+    } catch (error) {
+      console.error("STMemoryBooks: Error marking Arc entry:", error);
+      toastr.error(
+        translate("Failed to mark Arc entry", "STMemoryBooks_SceneRecon_FailedToMarkArc"),
+        "STMemoryBooks",
+      );
+    }
+  });
+  buttonsContainer.appendChild(markButton);
+
+  const clearButton = document.createElement("div");
+  clearButton.className = "menu_button interactable whitespacenowrap";
+  clearButton.textContent = "❌ " + translate("Clear Arc Binding", "STMemoryBooks_SceneRecon_ClearArcBinding");
+  clearButton.addEventListener("click", async () => {
+    try {
+      const freshData = await loadWorldInfo(lorebookName);
+      const result = clearArcEntry(freshData);
+      await saveWorldInfo(lorebookName, freshData, true);
+      toastr.success(result.message, "STMemoryBooks");
+      await renderArcEntrySection(container, buttonsContainer, lorebookName);
+    } catch (error) {
+      console.error("STMemoryBooks: Error clearing Arc entry:", error);
+      toastr.error(
+        translate("Failed to clear Arc entry binding", "STMemoryBooks_SceneRecon_FailedToClearArc"),
+        "STMemoryBooks",
+      );
+    }
+  });
+  buttonsContainer.appendChild(clearButton);
+}
+
+/**
  * Populate inline button containers with dynamic buttons (profile and manual lorebook buttons)
  */
 function populateInlineButtons() {
@@ -7807,6 +7943,23 @@ function populateInlineButtons() {
   const promptButtonsContainer = currentPopupInstance.content.querySelector(
     "#stmb-prompt-manager-buttons",
   );
+  const arcEntryStatusContainer = currentPopupInstance.content.querySelector(
+    "#stmb-arc-entry-status",
+  );
+  const arcEntryButtonsContainer = currentPopupInstance.content.querySelector(
+    "#stmb-arc-entry-buttons",
+  );
+
+  if (arcEntryStatusContainer && arcEntryButtonsContainer) {
+    const isManualMode = settings.moduleSettings.manualModeEnabled;
+    const chatBoundLorebook = chat_metadata?.[METADATA_KEY] ?? null;
+    const manualLorebook = getCurrentManualLorebookResolution({
+      settings,
+      markers: stmbData,
+    }).lorebookName;
+    const currentLorebookName = isManualMode ? manualLorebook : chatBoundLorebook;
+    void renderArcEntrySection(arcEntryStatusContainer, arcEntryButtonsContainer, currentLorebookName);
+  }
 
   // Populate manual lorebook buttons if container exists and manual mode is enabled
   if (manualLorebookContainer && settings.moduleSettings.manualModeEnabled) {
@@ -11071,6 +11224,7 @@ function initializeSettingsPopupSelect2(popupInstance = currentPopupInstance) {
 
 async function buildSettingsTemplateData({ includeSidePromptSets = false } = {}) {
   const settings = initializeSettings();
+  const sceneReconciliationSettings = getSceneReconciliationSettings();
   await SummaryPromptManager.firstRunInitIfMissing(settings);
   const sceneData = await getSceneData({
     includeHiddenMessages: !!settings.moduleSettings.unhideBeforeMemory,
@@ -11174,6 +11328,15 @@ async function buildSettingsTemplateData({ includeSidePromptSets = false } = {})
       settings.moduleSettings.autoAcceptGroupParticipants === true,
     characterAwareMemories: settings.moduleSettings.characterAwareMemories !== false,
     useSeparateGroupSidePrompts: settings.moduleSettings.useSeparateGroupSidePrompts !== false,
+    // Scene Reconciliation settings live on extension_settings.STMemoryBooks.moduleSettings
+    // but are read/validated via contextSettingsManager.js, not settings.moduleSettings directly.
+    sceneReconciliationEnabled: sceneReconciliationSettings.sceneReconciliationEnabled,
+    arcReconciliationMode: sceneReconciliationSettings.arcReconciliationMode,
+    maxNewCharactersPerRun: sceneReconciliationSettings.maxNewCharactersPerRun,
+    autoSkipSingleCharacterSuggestions: sceneReconciliationSettings.autoSkipSingleCharacterSuggestions,
+    previewBeforeReconciliationCommit: sceneReconciliationSettings.previewBeforeReconciliationCommit,
+    characterEntryReconciliationPrompt: sceneReconciliationSettings.characterEntryReconciliationPrompt || '',
+    newCharacterEntryPrompt: sceneReconciliationSettings.newCharacterEntryPrompt || '',
     autoRollbackEnabled: settings.moduleSettings.autoRollbackEnabled === true,
     autoRollbackApplyToBranches: settings.moduleSettings.autoRollbackApplyToBranches === true,
     autoRollbackUpdateLastProcessed:
@@ -11555,6 +11718,42 @@ function setupSettingsEventListeners(popupInstance = currentPopupInstance) {
         const container = currentPopupInstance.content.querySelector("#stmb-manual-group-lorebook-bindings");
         if (container) renderManualGroupLorebookBindings(container, getSceneMarkers() || {});
       }
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-enabled")) {
+      updateSceneReconciliationSetting("sceneReconciliationEnabled", e.target.checked);
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-mode")) {
+      updateSceneReconciliationSetting("arcReconciliationMode", e.target.value);
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-max-new-characters")) {
+      const value = clampInt(readIntInput(e.target, 10), 1, 50);
+      updateSceneReconciliationSetting("maxNewCharactersPerRun", value);
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-autoskip-single")) {
+      updateSceneReconciliationSetting("autoSkipSingleCharacterSuggestions", e.target.checked);
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-preview-commit")) {
+      updateSceneReconciliationSetting("previewBeforeReconciliationCommit", e.target.checked);
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-char-prompt-override")) {
+      updateSceneReconciliationSetting("characterEntryReconciliationPrompt", e.target.value);
+      return;
+    }
+
+    if (e.target.matches("#stmb-scenerecon-new-char-prompt-override")) {
+      updateSceneReconciliationSetting("newCharacterEntryPrompt", e.target.value);
       return;
     }
 

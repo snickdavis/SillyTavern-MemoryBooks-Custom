@@ -101,6 +101,15 @@ export const settingsTemplate = Handlebars.compile(`
             </div>
         </div>
 
+        <div class="world_entry_form_control" id="stmb-arc-entry-section">
+            <h4 data-i18n="STMemoryBooks_SceneRecon_ArcEntryTitle">Arc Entry</h4>
+            <small class="opacity50p" data-i18n="STMemoryBooks_SceneRecon_ArcEntryDesc">Designate which entry in the active lorebook tracks the story's Arc timeline.</small>
+            <div id="stmb-arc-entry-status" class="marginTop5"></div>
+            <div class="buttons_block marginTop5 justifyCenter gap10px whitespacenowrap" id="stmb-arc-entry-buttons">
+                <!-- Arc entry buttons will be dynamically inserted here -->
+            </div>
+        </div>
+
         <div class="world_entry_form_control">
             <label class="checkbox_label">
                 <input type="checkbox" id="stmb-manual-mode-enabled" {{#if manualModeEnabled}}checked{{/if}} {{#if autoCreateLorebook}}disabled{{/if}}>
@@ -298,6 +307,63 @@ export const generalSettingsTemplate = Handlebars.compile(`
             <span data-i18n="STMemoryBooks_GroupParticipants_AutoAccept">Automatically accept detected participants in future</span>
         </label>
     </div>
+
+    <h3 class="stmb-section-title" data-i18n="STMemoryBooks_SceneRecon_Title">Scene Reconciliation</h3>
+
+    <div class="world_entry_form_control">
+        <label class="checkbox_label">
+            <input type="checkbox" id="stmb-scenerecon-enabled" {{#if sceneReconciliationEnabled}}checked{{/if}}>
+            <span data-i18n="STMemoryBooks_SceneRecon_Enabled">Enable scene reconciliation mode</span>
+        </label>
+    </div>
+
+    <div class="world_entry_form_control">
+        <label for="stmb-scenerecon-mode">
+            <span data-i18n="STMemoryBooks_SceneRecon_Mode">Arc detection mode</span>
+            <select id="stmb-scenerecon-mode" class="text_pole">
+                <option value="auto" {{#if (eq arcReconciliationMode "auto")}}selected{{/if}} data-i18n="STMemoryBooks_SceneRecon_ModeAuto">Auto</option>
+                <option value="manual" {{#if (eq arcReconciliationMode "manual")}}selected{{/if}} data-i18n="STMemoryBooks_SceneRecon_ModeManual">Manual</option>
+                <option value="disabled" {{#if (eq arcReconciliationMode "disabled")}}selected{{/if}} data-i18n="STMemoryBooks_SceneRecon_ModeDisabled">Disabled</option>
+            </select>
+        </label>
+    </div>
+
+    <div class="world_entry_form_control">
+        <label for="stmb-scenerecon-max-new-characters">
+            <h4 data-i18n="STMemoryBooks_SceneRecon_MaxNewCharacters">Max new characters per run:</h4>
+            <input type="number" id="stmb-scenerecon-max-new-characters" class="text_pole" min="1" max="50" value="{{maxNewCharactersPerRun}}">
+        </label>
+    </div>
+
+    <div class="world_entry_form_control">
+        <label class="checkbox_label">
+            <input type="checkbox" id="stmb-scenerecon-autoskip-single" {{#if autoSkipSingleCharacterSuggestions}}checked{{/if}}>
+            <span data-i18n="STMemoryBooks_SceneRecon_AutoSkipSingle">Auto-skip single new-character suggestion</span>
+        </label>
+    </div>
+
+    <div class="world_entry_form_control">
+        <label class="checkbox_label">
+            <input type="checkbox" id="stmb-scenerecon-preview-commit" {{#if previewBeforeReconciliationCommit}}checked{{/if}}>
+            <span data-i18n="STMemoryBooks_SceneRecon_PreviewBeforeCommit">Show preview before commit</span>
+        </label>
+    </div>
+
+    <details class="marginTop10">
+        <summary data-i18n="STMemoryBooks_SceneRecon_Advanced">Advanced</summary>
+        <div class="world_entry_form_control">
+            <label for="stmb-scenerecon-char-prompt-override">
+                <span data-i18n="STMemoryBooks_SceneRecon_CharPromptOverride">Character entry reconciliation prompt override</span>
+            </label>
+            <textarea id="stmb-scenerecon-char-prompt-override" class="text_pole" rows="6" data-i18n="[placeholder]STMemoryBooks_SceneRecon_PromptOverridePlaceholder" placeholder="Leave empty to use the built-in default prompt.">{{characterEntryReconciliationPrompt}}</textarea>
+        </div>
+        <div class="world_entry_form_control">
+            <label for="stmb-scenerecon-new-char-prompt-override">
+                <span data-i18n="STMemoryBooks_SceneRecon_NewCharPromptOverride">New character entry prompt override</span>
+            </label>
+            <textarea id="stmb-scenerecon-new-char-prompt-override" class="text_pole" rows="6" data-i18n="[placeholder]STMemoryBooks_SceneRecon_PromptOverridePlaceholder" placeholder="Leave empty to use the built-in default prompt.">{{newCharacterEntryPrompt}}</textarea>
+        </div>
+    </details>
 
     <div class="world_entry_form_control">
         <h4 data-i18n="STMemoryBooks_DefaultAfterMemorySidePromptSets">Default After-Memory Side Prompt Sets</h4>
