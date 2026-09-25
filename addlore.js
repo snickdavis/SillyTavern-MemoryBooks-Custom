@@ -1653,14 +1653,15 @@ export function clearArcEntry(lorebookData) {
 }
 
 /**
- * 3-tier character entry lookup:
+ * 4-tier character entry lookup:
  *  1. canonical  - exact match on entry.STMB_characterName
  *  2. filter     - case/whitespace-insensitive match against entry.characterFilter.names[0]
- *  3. heuristic  - weak match: entry.comment contains the character name (logs a warning)
+ *  3. key        - case-insensitive exact match against any string in entry.key
+ *  4. heuristic  - weak match: entry.comment contains the character name (logs a warning)
  *
  * @param {Object} lorebookData
  * @param {string} characterName
- * @returns {{entry: Object|null, source: 'canonical'|'filter'|'heuristic'|'not_found'}}
+ * @returns {{entry: Object|null, source: 'canonical'|'filter'|'key'|'heuristic'|'not_found'}}
  */
 export function getCharacterEntry(lorebookData, characterName) {
     const name = String(characterName || '').trim();
@@ -1682,6 +1683,14 @@ export function getCharacterEntry(lorebookData, characterName) {
     });
     if (filterMatch) {
         return { entry: filterMatch, source: 'filter' };
+    }
+
+    const keyMatch = entries.find(entry => {
+        const keys = Array.isArray(entry?.key) ? entry.key : [];
+        return keys.some(key => String(key || '').trim().toLowerCase() === normalizedName);
+    });
+    if (keyMatch) {
+        return { entry: keyMatch, source: 'key' };
     }
 
     const heuristicMatch = entries.find(entry => String(entry?.comment || '').toLowerCase().includes(normalizedName));
@@ -1793,12 +1802,13 @@ const CHARACTER_NAME_DETECTION_STOPWORDS_LOWER = new Set([
  * ever message senders and compiledScene.metadata.presentCharacterNames stays empty).
  *
  * Combines two sources:
- *  A. Existing lorebook entries (excluding the Arc entry) whose canonical name (STMB_characterName ||
- *     characterFilter.names[0] || comment) appears as a whole word anywhere in the scene text.
- *     Always runs - this is the reliable part of detection. Every non-Arc entry is a candidate
- *     (no character-metadata gate), so plain pre-existing entries with only a title/comment are
- *     matched too; this can misdetect a lore/location/item entry whose title appears in the scene,
- *     but the preview-and-reject UI is the safety net for that.
+ *  A. Existing lorebook entries (excluding the Arc entry) whose name - checked in priority order as
+ *     STMB_characterName, characterFilter.names[0], each entry.key value, then comment/title -
+ *     appears as a whole word anywhere in the scene text. Always runs - this is the reliable part
+ *     of detection. Every non-Arc entry is a candidate (no character-metadata gate), so plain
+ *     pre-existing entries with only a title/comment are matched too; this can misdetect a
+ *     lore/location/item entry whose title appears in the scene, but the preview-and-reject UI is
+ *     the safety net for that.
  *  B. Heuristic candidates: capitalized word tokens not already matched in (A), not already in
  *     compiledScene.metadata.presentCharacterNames, and not matching options.excludePatterns,
  *     filtered by a stopword list and a minimum frequency, capped and sorted by frequency. Opt-in
@@ -1841,6 +1851,9 @@ export function detectCharacterNamesInSceneText(compiledScene, lorebookData, opt
     const existingMatches = [];
     const existingMatchedLower = new Set();
 
+    const textHasWholeWord = (candidate) => !!candidate
+        && new RegExp('\\b' + escapeRegex(candidate) + '\\b', 'i').test(sceneText);
+
     for (const entry of entries) {
         // No isCharacterEntry gate: every entry is a name candidate (plain pre-existing lorebook
         // entries never get STMB_characterEntryType/STMB_characterName set), except the Arc entry
@@ -1852,22 +1865,44 @@ export function detectCharacterNamesInSceneText(compiledScene, lorebookData, opt
             continue;
         }
 
-        const name = String(entry?.STMB_characterName || entry?.characterFilter?.names?.[0] || entry?.comment || '').trim();
-        if (!name) {
+        const canonicalName = String(entry?.STMB_characterName || '').trim();
+        const filterName = String(entry?.characterFilter?.names?.[0] || '').trim();
+        const keyNames = Array.isArray(entry?.key) ? entry.key.map(key => String(key || '').trim()).filter(Boolean) : [];
+        const commentName = String(entry?.comment || '').trim();
+
+        // entry.key holds the entry's plain trigger keyword(s), which real lorebook entries almost
+        // always have even when their comment/title is a decorative multi-word string (e.g.
+        // "Reina - Sister, Kunai Specialist") that never appears verbatim in prose. Priority when
+        // multiple candidates could match: canonical > filter > the specific key that matched (not
+        // necessarily key[0]) > comment, so the reported name reflects the most authoritative source
+        // that's actually confirmed present in the text.
+        let matchedName = null;
+        if (textHasWholeWord(canonicalName)) {
+            matchedName = canonicalName;
+        } else if (textHasWholeWord(filterName)) {
+            matchedName = filterName;
+        } else {
+            const matchedKey = keyNames.find(key => textHasWholeWord(key));
+            if (matchedKey) {
+                matchedName = matchedKey;
+            } else if (textHasWholeWord(commentName)) {
+                matchedName = commentName;
+            }
+        }
+
+        if (!matchedName) {
             continue;
         }
 
-        const lower = name.toLowerCase();
+        const lower = matchedName.toLowerCase();
         if (existingMatchedLower.has(lower)) {
             continue;
         }
 
-        const pattern = new RegExp('\\b' + escapeRegex(name) + '\\b', 'i');
-        if (pattern.test(sceneText)) {
-            existingMatches.push(name);
-            existingMatchedLower.add(lower);
-        }
+        existingMatches.push(matchedName);
+        existingMatchedLower.add(lower);
     }
+
 
     // B. Heuristic new-character candidates from capitalized word tokens - opt-in only, see
     // options.includeHeuristicCandidates doc above.

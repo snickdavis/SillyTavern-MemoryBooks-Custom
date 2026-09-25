@@ -147,6 +147,15 @@ test('getCharacterEntry falls back to a characterFilter.names match', () => {
     assert.equal(result.source, 'filter');
 });
 
+test('getCharacterEntry matches via the entry.key tier, positioned before the comment heuristic', () => {
+    const { api } = loadAddlore();
+    const keyed = { uid: 1, comment: 'Reina - Sister, Kunai Specialist', key: ['Reina'] };
+    const lorebookData = lorebook([keyed]);
+    const result = api.getCharacterEntry(lorebookData, 'reina');
+    assert.equal(result.entry, keyed);
+    assert.equal(result.source, 'key');
+});
+
 test('getCharacterEntry falls back to a weak comment-substring heuristic match', () => {
     const { api } = loadAddlore();
     const heuristic = { uid: 1, comment: 'About Alice the Wanderer' };
@@ -248,6 +257,17 @@ test('detectCharacterNamesInSceneText matches an existing entry via the characte
 test('detectCharacterNamesInSceneText detects a plain lorebook entry with no character metadata via its comment/title', () => {
     const { api } = loadAddlore();
     const reinaEntry = { uid: 1, comment: 'Reina' };
+    const lorebookData = lorebook([reinaEntry]);
+    const scene = compiledSceneWithText(['Reina walked into the tavern and sat down.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), ['Reina']);
+});
+
+test('detectCharacterNamesInSceneText detects an existing entry via entry.key when its comment is a decorative title never verbatim in the scene text', () => {
+    const { api } = loadAddlore();
+    const reinaEntry = { uid: 1, comment: 'Reina - Sister, Kunai Specialist', key: ['Reina'] };
     const lorebookData = lorebook([reinaEntry]);
     const scene = compiledSceneWithText(['Reina walked into the tavern and sat down.']);
 
