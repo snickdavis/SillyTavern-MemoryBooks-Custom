@@ -1793,9 +1793,12 @@ const CHARACTER_NAME_DETECTION_STOPWORDS_LOWER = new Set([
  * ever message senders and compiledScene.metadata.presentCharacterNames stays empty).
  *
  * Combines two sources:
- *  A. Existing character entries whose canonical name (STMB_characterName ||
+ *  A. Existing lorebook entries (excluding the Arc entry) whose canonical name (STMB_characterName ||
  *     characterFilter.names[0] || comment) appears as a whole word anywhere in the scene text.
- *     Always runs - this is the reliable part of detection.
+ *     Always runs - this is the reliable part of detection. Every non-Arc entry is a candidate
+ *     (no character-metadata gate), so plain pre-existing entries with only a title/comment are
+ *     matched too; this can misdetect a lore/location/item entry whose title appears in the scene,
+ *     but the preview-and-reject UI is the safety net for that.
  *  B. Heuristic candidates: capitalized word tokens not already matched in (A), not already in
  *     compiledScene.metadata.presentCharacterNames, and not matching options.excludePatterns,
  *     filtered by a stopword list and a minimum frequency, capped and sorted by frequency. Opt-in
@@ -1839,14 +1842,17 @@ export function detectCharacterNamesInSceneText(compiledScene, lorebookData, opt
     const existingMatchedLower = new Set();
 
     for (const entry of entries) {
-        const isCharacterEntry = entry?.STMB_characterEntryType === 'character'
-            || Boolean(String(entry?.STMB_characterName || '').trim())
-            || Boolean((Array.isArray(entry?.characterFilter?.names) ? entry.characterFilter.names[0] : ''));
-        if (!isCharacterEntry) {
+        // No isCharacterEntry gate: every entry is a name candidate (plain pre-existing lorebook
+        // entries never get STMB_characterEntryType/STMB_characterName set), except the Arc entry
+        // itself, whose title should never be mistaken for a character. Trade-off: a lore/location/
+        // item entry whose title happens to appear in the scene text can now be misdetected as an
+        // existing character - the preview-and-reject UI is the safety net for that, same as it
+        // already is for part B's heuristic candidates.
+        if (entry?.STMB_isArcEntry === true) {
             continue;
         }
 
-        const name = String(entry.STMB_characterName || entry.characterFilter?.names?.[0] || entry.comment || '').trim();
+        const name = String(entry?.STMB_characterName || entry?.characterFilter?.names?.[0] || entry?.comment || '').trim();
         if (!name) {
             continue;
         }

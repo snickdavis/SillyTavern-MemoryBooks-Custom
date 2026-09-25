@@ -245,6 +245,28 @@ test('detectCharacterNamesInSceneText matches an existing entry via the characte
     assert.deepEqual(structuredClone(result), ['Bob']);
 });
 
+test('detectCharacterNamesInSceneText detects a plain lorebook entry with no character metadata via its comment/title', () => {
+    const { api } = loadAddlore();
+    const reinaEntry = { uid: 1, comment: 'Reina' };
+    const lorebookData = lorebook([reinaEntry]);
+    const scene = compiledSceneWithText(['Reina walked into the tavern and sat down.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), ['Reina']);
+});
+
+test('detectCharacterNamesInSceneText excludes the Arc entry itself even if its title appears in the scene text', () => {
+    const { api } = loadAddlore();
+    const arcEntry = { uid: 1, comment: 'Reina', STMB_isArcEntry: true };
+    const lorebookData = lorebook([arcEntry]);
+    const scene = compiledSceneWithText(['Reina walked into the tavern and sat down.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), []);
+});
+
 test('detectCharacterNamesInSceneText returns a repeated capitalized name as a heuristic candidate', () => {
     const { api } = loadAddlore();
     const lorebookData = lorebook([]);
