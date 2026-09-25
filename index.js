@@ -7182,6 +7182,10 @@ async function runSceneReconciliationFlow(sceneData, lorebookValidation, effecti
 
   if (Array.isArray(reconciliationResult.errors) && reconciliationResult.errors.length > 0) {
     console.warn("STMemoryBooks: Scene reconciliation had partial errors:", reconciliationResult.errors);
+    toastr.warning(
+      __st_t_tag`Scene reconciliation: ${reconciliationResult.errors.length} item(s) failed - see the preview for details.`,
+      "STMemoryBooks",
+    );
   }
 
   if (recon.previewBeforeCommit) {

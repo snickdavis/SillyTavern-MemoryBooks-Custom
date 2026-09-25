@@ -752,6 +752,22 @@ export const consolidationPreviewTemplate = Handlebars.compile(`
  * character proposals) - each only appears when the corresponding data is present.
  */
 export const sceneReconciliationPreviewTemplate = Handlebars.compile(`
+    {{#if hasErrors}}
+    <div class="world_entry_form_control stmb-box padding10 marginBot10 stmb-scenerecon-errors">
+        <h4 data-i18n="STMemoryBooks_SceneReconciliationPreview_ErrorsTitle">Errors</h4>
+        <ul class="stmb-scenerecon-error-list">
+            {{#if arcError}}
+            <li><span data-i18n="STMemoryBooks_SceneReconciliationPreview_ArcErrorPrefix">Arc</span>: {{arcError}}</li>
+            {{/if}}
+            {{#each failedCharacters}}
+            <li>{{characterName}}: {{error}}</li>
+            {{/each}}
+            {{#each failedNewCharacters}}
+            <li><span data-i18n="STMemoryBooks_SceneReconciliationPreview_NewCharacterFailedPrefix">Failed to generate a profile for</span> {{characterName}}</li>
+            {{/each}}
+        </ul>
+    </div>
+    {{/if}}
     <h3 data-i18n="STMemoryBooks_SceneReconciliationPreview_Title">Scene Reconciliation Preview</h3>
     <div class="world_entry_form_control">
         <small class="marginBot10" data-i18n="STMemoryBooks_SceneReconciliationPreview_Desc">Review proposed Arc and character entry updates before applying them. Every item below needs an explicit decision.</small>

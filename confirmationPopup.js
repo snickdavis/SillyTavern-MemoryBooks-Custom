@@ -1181,9 +1181,12 @@ function noopSceneReconciliationResult() {
  *   newCharacterApprovals: Map<string, boolean>,
  *   newCharacterEdits: Map<string, {title: string, content: string, keywords: string[]}>,
  * }>} If there is nothing to review (no processed Arc operation, no processed character
- *   operations, and no pending new-character proposals), no popup is shown and this resolves
- *   immediately with a harmless no-op result (`action: 'cancel'`, everything else empty/null) -
- *   callers should treat that as "nothing to do", not as a user rejection.
+ *   operations, no pending new-character proposals) AND nothing failed either, no popup is
+ *   shown and this resolves immediately with a harmless no-op result (`action: 'cancel'`,
+ *   everything else empty/null) - callers should treat that as "nothing to do", not as a user
+ *   rejection. If nothing is reviewable but one or more items errored, the popup is still shown
+ *   with only the Errors section and a Close button (no Apply, since there's nothing to apply);
+ *   accepting that popup is impossible, so it also resolves as the same no-op result.
  */
 export async function showSceneReconciliationPreviewPopup({
   arcOperation = null,
@@ -1201,13 +1204,34 @@ export async function showSceneReconciliationPreviewPopup({
     const reviewableNewCharacters = (Array.isArray(newCharacterProposals) ? newCharacterProposals : [])
       .filter(proposal => proposal && proposal.status === 'pending');
 
-    if (!showArc && reviewableCharacterOps.length === 0 && reviewableNewCharacters.length === 0) {
+    // Failed items are dropped from the reviewable lists above but must still be surfaced -
+    // otherwise a fully-failed run produces zero visible signal to the user (see bug report).
+    const arcHasError = Boolean(arcOperation && arcOperation.status === 'error');
+    const failedCharacterOps = (Array.isArray(characterOperations) ? characterOperations : [])
+      .filter(op => op && op.status === 'error');
+    // 'rejected' is the status new-character LLM generation failures use (no dedicated 'error'
+    // state exists in that enum - see sceneReconciliation.js); it carries no error detail.
+    const failedNewCharacterProposals = (Array.isArray(newCharacterProposals) ? newCharacterProposals : [])
+      .filter(proposal => proposal && proposal.status === 'rejected');
+    const hasErrors = arcHasError || failedCharacterOps.length > 0 || failedNewCharacterProposals.length > 0;
+    const hasReviewableItems = showArc || reviewableCharacterOps.length > 0 || reviewableNewCharacters.length > 0;
+
+    if (!hasReviewableItems && !hasErrors) {
       return noopSceneReconciliationResult();
     }
 
     const templateData = {
       lorebookName: String(lorebookName || ''),
       sceneRange: String(sceneRange || ''),
+      hasErrors,
+      arcError: arcHasError ? String(arcOperation.error || '') : null,
+      failedCharacters: failedCharacterOps.map(op => ({
+        characterName: String(op.characterName || ''),
+        error: String(op.error || ''),
+      })),
+      failedNewCharacters: failedNewCharacterProposals.map(proposal => ({
+        characterName: String(proposal.characterName || ''),
+      })),
       showArc,
       arc: showArc ? {
         titleValue: String(arcOperation.entry?.comment || ''),
@@ -1239,9 +1263,17 @@ export async function showSceneReconciliationPreviewPopup({
     const content = DOMPurify.sanitize(sceneReconciliationPreviewTemplate(templateData));
     safePlayMessageSound();
 
-    popup = new Popup(content, POPUP_TYPE.TEXT, '', {
+    // Nothing-reviewable-but-something-failed: show the Errors section only, with a single
+    // Close button - there is nothing for "Apply All Changes" to do in that case.
+    popup = new Popup(content, POPUP_TYPE.TEXT, '', hasReviewableItems ? {
       okButton: translate('Apply All Changes', 'STMemoryBooks_SceneReconciliationPreview_ApplyAll'),
       cancelButton: translate('Cancel', 'STMemoryBooks_Cancel'),
+      allowVerticalScrolling: true,
+      wide: true,
+      large: true,
+    } : {
+      okButton: false,
+      cancelButton: translate('Close', 'STMemoryBooks_Close'),
       allowVerticalScrolling: true,
       wide: true,
       large: true,
