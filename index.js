@@ -7065,7 +7065,7 @@ function applySceneReconciliationPreviewDecisions(reconciliationResult, decision
  * Never partially writes: any cancellation/compile/AI failure returns false before the apply call.
  * @returns {Promise<boolean>}
  */
-async function runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings) {
+async function runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation = null) {
   const { profileSettings, settings } = effectiveSettings;
   const recon = getSceneReconciliationModuleSettings(settings);
 
@@ -7079,6 +7079,10 @@ async function runSceneReconciliationFlow(sceneData, lorebookValidation, effecti
   try {
     const sceneRequest = createSceneRequest(sceneData.sceneStart, sceneData.sceneEnd);
     const compiledScene = compileScene(sceneRequest);
+    const context = getCurrentMemoryBooksContext();
+    // Narrator Mode scenes have no per-message sender to derive characters from - resolve the
+    // tagged cast into presentCharacterNames, exactly like the regular memory-creation flow does.
+    applyNarratorSceneMetadata(compiledScene, context);
     const validation = validateCompiledScene(compiledScene);
     if (!validation.valid) {
       toastr.clear();
@@ -7087,6 +7091,25 @@ async function runSceneReconciliationFlow(sceneData, lorebookValidation, effecti
         "STMemoryBooks",
       );
       return false;
+    }
+
+    if (context?.isNarratorMode) {
+      const hasUntagged = !!compiledScene?.metadata?.narratorHasUntaggedMessages;
+      if (hasUntagged) toastr.clear();
+      const participantsConfirmed = await confirmNarratorSceneParticipants(
+        compiledScene,
+        manualGroupLorebookValidation,
+      );
+      if (!participantsConfirmed) {
+        return false;
+      }
+      if (hasUntagged) {
+        toastr.info(
+          translate("Reconciling scene with existing entries...", "STMemoryBooks_SceneReconciliation_Working"),
+          "STMemoryBooks",
+          { timeOut: 0 },
+        );
+      }
     }
 
     reconciliationResult = await reconcileSceneWithLorebook({
@@ -7349,7 +7372,7 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
         isProcessingMemory = false;
         return false;
       }
-      return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings);
+      return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation);
     }
     if (
       options.forceReconciliationChoice !== "createNew" &&
@@ -7361,7 +7384,7 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
         return false;
       }
       if (choice === "reconcile") {
-        return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings);
+        return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation);
       }
       // choice === "createNew" falls through to the existing behavior, unchanged.
     }
