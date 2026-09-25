@@ -96,6 +96,7 @@ import {
 import {
   automaticMemoriesSettingsTemplate,
   generalSettingsTemplate,
+  sceneReconciliationSettingsTemplate,
   settingsTemplate,
 } from "./templates.js";
 import {
@@ -7312,12 +7313,12 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
       currentPopupInstance = null;
     }
 
-    // Scene Reconciliation is an interactive, direct-write alternative to the queued-jobs
-    // pipeline, so it's only offered outside of jobs mode and when explicitly allowed (batch
-    // callers like /stmb-catchup pass allowSceneReconciliationPrompt: false to stay non-interactive).
+    // Scene Reconciliation is synchronous and interactive (LLM call + preview popup, no retry/
+    // async infra), so it intentionally bypasses the job queue and runs inline even when Jobs
+    // mode is active for regular memory creation. Only gated by eligibility and explicit opt-out
+    // (batch callers like /stmb-catchup pass allowSceneReconciliationPrompt: false to stay non-interactive).
     if (
       options.allowSceneReconciliationPrompt !== false &&
-      !areStmbJobsEnabled() &&
       isSceneReconciliationEligible(settings, lorebookValidation)
     ) {
       const choice = await showCreateOrReconcileChoicePopup();
@@ -7943,23 +7944,6 @@ function populateInlineButtons() {
   const promptButtonsContainer = currentPopupInstance.content.querySelector(
     "#stmb-prompt-manager-buttons",
   );
-  const arcEntryStatusContainer = currentPopupInstance.content.querySelector(
-    "#stmb-arc-entry-status",
-  );
-  const arcEntryButtonsContainer = currentPopupInstance.content.querySelector(
-    "#stmb-arc-entry-buttons",
-  );
-
-  if (arcEntryStatusContainer && arcEntryButtonsContainer) {
-    const isManualMode = settings.moduleSettings.manualModeEnabled;
-    const chatBoundLorebook = chat_metadata?.[METADATA_KEY] ?? null;
-    const manualLorebook = getCurrentManualLorebookResolution({
-      settings,
-      markers: stmbData,
-    }).lorebookName;
-    const currentLorebookName = isManualMode ? manualLorebook : chatBoundLorebook;
-    void renderArcEntrySection(arcEntryStatusContainer, arcEntryButtonsContainer, currentLorebookName);
-  }
 
   // Populate manual lorebook buttons if container exists and manual mode is enabled
   if (manualLorebookContainer && settings.moduleSettings.manualModeEnabled) {
@@ -11595,6 +11579,53 @@ async function showGeneralSettingsPopup(options = {}) {
   }
 }
 
+/**
+ * Show the Scene Reconciliation settings popup — combines the Arc Entry
+ * designation control with the Scene Reconciliation toggle group, both
+ * formerly split across showSettingsPopup() and showGeneralSettingsPopup().
+ */
+async function showSceneReconciliationSettingsPopup() {
+  try {
+    const settings = initializeSettings();
+    const templateData = await buildSettingsTemplateData();
+    const content = DOMPurify.sanitize(sceneReconciliationSettingsTemplate(templateData));
+    const popup = new Popup(content, POPUP_TYPE.TEXT, "", {
+      wide: true,
+      large: true,
+      allowVerticalScrolling: true,
+      cancelButton: translate("Close", "STMemoryBooks_Close"),
+      okButton: false,
+      onClose: handleSettingsFormPopupClose,
+    });
+    markStmbPopup(popup);
+    setupSettingsEventListeners(popup);
+
+    const arcEntryStatusContainer = popup.content.querySelector("#stmb-arc-entry-status");
+    const arcEntryButtonsContainer = popup.content.querySelector("#stmb-arc-entry-buttons");
+    if (arcEntryStatusContainer && arcEntryButtonsContainer) {
+      const isManualMode = settings.moduleSettings.manualModeEnabled;
+      const chatBoundLorebook = chat_metadata?.[METADATA_KEY] ?? null;
+      const manualLorebook = getCurrentManualLorebookResolution({
+        settings,
+        markers: getSceneMarkers() || {},
+      }).lorebookName;
+      const currentLorebookName = isManualMode ? manualLorebook : chatBoundLorebook;
+      void renderArcEntrySection(arcEntryStatusContainer, arcEntryButtonsContainer, currentLorebookName);
+    }
+
+    await popup.show();
+  } catch (error) {
+    console.error("STMemoryBooks: Error showing Scene Reconciliation settings popup:", error);
+    toastr.error(
+      translate(
+        "Failed to open Scene Reconciliation settings",
+        "STMemoryBooks_FailedToOpenSceneReconciliationSettings",
+      ),
+      "STMemoryBooks",
+    );
+  }
+}
+
 async function showAutomaticMemoriesSettingsPopup() {
   try {
     const templateData = await buildSettingsTemplateData();
@@ -13020,6 +13051,19 @@ function createUI() {
   if (extensionsMenu.length > 0) {
     extensionsMenu.append(menuItem);
     applyLocale(menuItem[0]);
+
+    const sceneReconMenuItem = $(
+      `
+        <div id="stmb-scenerecon-menu-item-container" class="extension_container interactable" tabindex="0">
+            <div id="stmb-scenerecon-menu-item" class="list-group-item flex-container flexGap5 interactable" tabindex="0">
+                <div class="fa-fw fa-solid fa-diagram-project extensionsMenuExtensionButton"></div>
+                <span data-i18n="STMemoryBooks_SceneRecon_MenuItem">Scene Reconciliation</span>
+            </div>
+        </div>
+        `,
+    );
+    extensionsMenu.append(sceneReconMenuItem);
+    applyLocale(sceneReconMenuItem[0]);
   } else {
     console.warn(
       "STMemoryBooks: Extensions menu not found - retrying initialization",
@@ -13466,6 +13510,7 @@ function queueMemoryAutoRollback({ chatKey, chatId, deletion }) {
  */
 function setupEventListeners() {
   $(document).on("click", SELECTORS.menuItem, showSettingsPopup);
+  $(document).on("click", "#stmb-scenerecon-menu-item", showSceneReconciliationSettingsPopup);
   $(document).on("click", ".stmb-regenerate-entry", function (event) {
     event.preventDefault();
     event.stopPropagation();
