@@ -644,90 +644,140 @@ function formatSceneMessages(compiledScene) {
 }
 
 /**
- * Build the SINGLE combined Scene Reconciliation prompt covering the Arc entry (if any),
- * every existing character entry needing reconciliation, and every brand-new character
- * needing a fresh profile - all in one request, replacing the former one-call-per-item
- * approach (see sceneReconciliation.js's reconcileSceneWithLorebook()).
+ * Build the Scene Reconciliation prompt for the Arc entry ONLY - one call per lorebook entry
+ * (restored per-item architecture; see sceneReconciliation.js's reconcileSceneWithLorebook()).
  *
- * Carries over the same reconciliation instructions (preserve non-contradicted canon, rewrite
- * only contradicted sections, ~100-200 words per character / no fixed target for the Arc, which
- * is an accumulating timeline whose full existing length and detail must be preserved) and the
- * same new-profile instructions (~150-300 words, Identity/Appearance/Role/Traits/What Happened/
- * Continuity Hooks) previously split across getCharacterEntryReconciliationPrompt() and
- * getNewCharacterEntryPrompt(), just adapted to ask for all of them in one response.
+ * Carries over the exact preserve-full-length instruction (rule 6 of the former combined
+ * prompt): the Arc entry is an accumulating timeline whose full existing length, structure, and
+ * detail must be preserved - only the contradicted portion is amended, or new beats appended.
+ * No word-count target, since the appropriate length scales with accumulated history.
  *
  * @param {Object} params
- * @param {Object|null} [params.arcEntry] - Arc entry object (uses entry.content), or null/undefined if none
- * @param {Array<{name: string, entry: Object}>} [params.existingCharacters] - Characters with existing entries to reconcile
- * @param {string[]} [params.newCharacterNames] - Plain names with no existing entry (profile needs creating)
+ * @param {Object} params.arcEntry - Arc entry object (uses entry.content)
  * @param {Object} params.compiledScene - Output of chatcompile.js's compileScene()
  * @returns {string} Complete prompt ready to send to the model
  */
-export function getCombinedSceneReconciliationPrompt({ arcEntry = null, existingCharacters = [], newCharacterNames = [], compiledScene } = {}) {
-    const characterList = Array.isArray(existingCharacters) ? existingCharacters : [];
-    const newNames = Array.isArray(newCharacterNames) ? newCharacterNames : [];
-
+export function getArcReconciliationPrompt({ arcEntry, compiledScene } = {}) {
     const header = tr(
-        'STMemoryBooks_CombinedReconciliationPrompt_Default',
+        'STMemoryBooks_ArcReconciliationPrompt_Default',
         `You are an expert continuity editor for an ongoing story.
 
-A NEW SCENE has just occurred. Your task is to reconcile ALL of the current canon material below against it in a single pass, producing updated entries for everything listed.
+A NEW SCENE has just occurred. Your task is to reconcile the CURRENT ARC ENTRY below against it.
 
-If a CURRENT ARC ENTRY and/or CURRENT CHARACTER ENTRIES are provided below, for each one:
 1. Treat its current content as established canon. Do not discard, contradict, or remove any fact unless the NEW SCENE directly contradicts it.
-2. Read the NEW SCENE carefully for events, statements, or details involving or mentioning it.
+2. Read the NEW SCENE carefully for events, statements, or details relevant to the story's overall timeline.
 3. Where the NEW SCENE directly contradicts the current content (for example, "X is about to leave" becoming "X has now arrived"), rewrite only the contradicted sections to reflect the new truth. Leave everything else unchanged.
 4. Add any new facts, relationships, or status changes revealed by the NEW SCENE that do not already appear in the current content.
 5. Do not invent facts that are not supported by either the current content or the NEW SCENE.
 6. The Arc entry's "content" is an ACCUMULATING timeline spanning the entire story so far (e.g. multiple parts and arcs) and may already be long. Preserve its full existing length, structure, and level of detail exactly as established. Do not compress, summarize, shorten, or remove any prior beat, turn, or detail that the NEW SCENE does not directly contradict - only amend the specific contradicted portion(s) per rule 3, or append the new beat(s) introduced by the NEW SCENE per rule 4. There is no target length: the appropriate length scales with however much history has already accumulated plus whatever the new scene adds.
-7. Keep each character entry's "content" concise and high-level: current status, key relationship or status changes from the NEW SCENE, and anything a future scene would need to know. Cut minor blow-by-blow detail. Target roughly 100-200 words.
-
-If any NEW CHARACTERS TO PROFILE are listed below, for each one write a brand-new profile based only on what the NEW SCENE establishes (no prior canon entry exists for them). Cover, in order (keep each section short): Identity - name, aliases, and origin, if established; Appearance - physical description, if established; Role & Relationships - their role in the story and relationships to other characters; Key Traits - personality and motivations as shown in the scene; What Happened - a brief summary of their actions in this scene; Continuity Hooks - facts, promises, secrets, or open threads likely to matter later. Do not invent facts not supported by the NEW SCENE. Target 150-300 words for each "content" field.
 
 Return valid JSON only, with no commentary or code fences, in EXACTLY this structure:
 {
-  "arc": { "title": string, "content": string, "keywords": string[] } | null,
-  "characters": [ { "characterName": string, "title": string, "content": string, "keywords": string[] } ],
-  "newCharacters": [ { "characterName": string, "title": string, "content": string, "keywords": string[] } ]
-}
-
-"arc" must be null if no CURRENT ARC ENTRY section is provided below. "characters" and "newCharacters" must each include exactly one entry per name listed in the corresponding section below (using the exact characterName given), and must be empty arrays if no names are listed for that section.`,
+  "title": string,
+  "content": string,
+  "keywords": string[]
+}`,
     );
 
     const lines = [header, ''];
-
     lines.push(tr('STMemoryBooks_Reconciliation_NewSceneStart', '=== NEW SCENE ==='));
     lines.push(formatSceneMessages(compiledScene));
     lines.push(tr('STMemoryBooks_Reconciliation_NewSceneEnd', '=== END NEW SCENE ==='));
     lines.push('');
+    lines.push(tr('STMemoryBooks_CombinedReconciliation_ArcEntryStart', '=== CURRENT ARC ENTRY ==='));
+    lines.push((arcEntry?.content || '').toString().trim());
+    lines.push(tr('STMemoryBooks_CombinedReconciliation_ArcEntryEnd', '=== END CURRENT ARC ENTRY ==='));
 
-    if (arcEntry) {
-        lines.push(tr('STMemoryBooks_CombinedReconciliation_ArcEntryStart', '=== CURRENT ARC ENTRY ==='));
-        lines.push((arcEntry.content || '').toString().trim());
-        lines.push(tr('STMemoryBooks_CombinedReconciliation_ArcEntryEnd', '=== END CURRENT ARC ENTRY ==='));
-        lines.push('');
-    }
+    return lines.join('\n');
+}
 
-    if (characterList.length > 0) {
-        lines.push(tr('STMemoryBooks_CombinedReconciliation_CharacterEntriesStart', '=== CURRENT CHARACTER ENTRIES ==='));
-        for (const { name, entry } of characterList) {
-            lines.push(tr('STMemoryBooks_CombinedReconciliation_CharacterEntrySubheader', '--- {{name}} ---', { name }));
-            lines.push((entry?.content || '').toString().trim());
-        }
-        lines.push(tr('STMemoryBooks_CombinedReconciliation_CharacterEntriesEnd', '=== END CURRENT CHARACTER ENTRIES ==='));
-        lines.push('');
-    }
+/**
+ * Build the Scene Reconciliation prompt for a SINGLE existing character entry - one call per
+ * character (restored per-item architecture; see sceneReconciliation.js's
+ * reconcileSceneWithLorebook()).
+ *
+ * Carries over the exact concise-content instruction (rule 7 of the former combined prompt):
+ * current status, key relationship/status changes, and anything a future scene would need to
+ * know, cutting minor blow-by-blow detail, targeting roughly 100-200 words.
+ *
+ * @param {Object} params
+ * @param {Object} params.entry - Existing character entry object (uses entry.content)
+ * @param {string} params.characterName
+ * @param {Object} params.compiledScene - Output of chatcompile.js's compileScene()
+ * @returns {string} Complete prompt ready to send to the model
+ */
+export function getCharacterReconciliationPrompt({ entry, characterName, compiledScene } = {}) {
+    const header = tr(
+        'STMemoryBooks_CharacterReconciliationPrompt_Default',
+        `You are an expert continuity editor for an ongoing story.
 
-    lines.push(tr('STMemoryBooks_CombinedReconciliation_NewCharactersStart', '=== NEW CHARACTERS TO PROFILE ==='));
-    if (newNames.length > 0) {
-        for (const name of newNames) {
-            lines.push(`- ${name}`);
-        }
-    } else {
-        lines.push(translate('(none)', 'STMemoryBooks_CombinedReconciliation_NoneLabel'));
-    }
-    lines.push(tr('STMemoryBooks_CombinedReconciliation_NewCharactersEnd', '=== END NEW CHARACTERS TO PROFILE ==='));
+A NEW SCENE has just occurred. Your task is to reconcile the CURRENT CHARACTER ENTRY for {{name}} below against it.
+
+1. Treat its current content as established canon. Do not discard, contradict, or remove any fact unless the NEW SCENE directly contradicts it.
+2. Read the NEW SCENE carefully for events, statements, or details involving or mentioning {{name}}.
+3. Where the NEW SCENE directly contradicts the current content (for example, "X is about to leave" becoming "X has now arrived"), rewrite only the contradicted sections to reflect the new truth. Leave everything else unchanged.
+4. Add any new facts, relationships, or status changes revealed by the NEW SCENE that do not already appear in the current content.
+5. Do not invent facts that are not supported by either the current content or the NEW SCENE.
+6. Keep the entry's "content" concise and high-level: current status, key relationship or status changes from the NEW SCENE, and anything a future scene would need to know. Cut minor blow-by-blow detail. Target roughly 100-200 words.
+
+Return valid JSON only, with no commentary or code fences, in EXACTLY this structure:
+{
+  "title": string,
+  "content": string,
+  "keywords": string[]
+}`,
+        { name: characterName },
+    );
+
+    const lines = [header, ''];
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneStart', '=== NEW SCENE ==='));
+    lines.push(formatSceneMessages(compiledScene));
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneEnd', '=== END NEW SCENE ==='));
     lines.push('');
+    lines.push(tr('STMemoryBooks_CombinedReconciliation_CharacterEntrySubheader', '--- {{name}} ---', { name: characterName }));
+    lines.push((entry?.content || '').toString().trim());
+
+    return lines.join('\n');
+}
+
+/**
+ * Build the new-character profile prompt for a SINGLE brand-new character with no existing
+ * entry - one call per candidate (restored per-item architecture; see sceneReconciliation.js's
+ * reconcileSceneWithLorebook()).
+ *
+ * Carries over the exact section-structured instructions previously used for new profiles:
+ * Identity/Appearance/Role & Relationships/Key Traits/What Happened/Continuity Hooks, targeting
+ * 150-300 words.
+ *
+ * @param {Object} params
+ * @param {string} params.characterName
+ * @param {Object} params.compiledScene - Output of chatcompile.js's compileScene()
+ * @returns {string} Complete prompt ready to send to the model
+ */
+export function getNewCharacterEntryPrompt({ characterName, compiledScene } = {}) {
+    const header = tr(
+        'STMemoryBooks_NewCharacterPrompt_Default',
+        `You are an expert continuity editor for an ongoing story.
+
+A NEW SCENE has just occurred, introducing a new character named {{name}} who has no prior canon entry. Your task is to write a brand-new profile for {{name}} based only on what the NEW SCENE establishes.
+
+Cover, in order (keep each section short): Identity - name, aliases, and origin, if established; Appearance - physical description, if established; Role & Relationships - their role in the story and relationships to other characters; Key Traits - personality and motivations as shown in the scene; What Happened - a brief summary of their actions in this scene; Continuity Hooks - facts, promises, secrets, or open threads likely to matter later.
+
+Do not invent facts not supported by the NEW SCENE. Target 150-300 words for the "content" field.
+
+Return valid JSON only, with no commentary or code fences, in EXACTLY this structure:
+{
+  "title": string,
+  "content": string,
+  "keywords": string[]
+}`,
+        { name: characterName },
+    );
+
+    const lines = [header, ''];
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneStart', '=== NEW SCENE ==='));
+    lines.push(formatSceneMessages(compiledScene));
+    lines.push(tr('STMemoryBooks_Reconciliation_NewSceneEnd', '=== END NEW SCENE ==='));
 
     return lines.join('\n');
 }

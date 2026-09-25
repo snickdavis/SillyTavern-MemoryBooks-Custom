@@ -3,7 +3,7 @@
 
 import { getArcEntry, getCharacterEntry, filterCharactersForReconciliation, detectCharacterNamesInSceneText } from './addlore.js';
 import { sendRawCompletionRequest } from './stmemory.js';
-import { getCombinedSceneReconciliationPrompt } from './templatesArcPrompts.js';
+import { getArcReconciliationPrompt, getCharacterReconciliationPrompt, getNewCharacterEntryPrompt } from './templatesArcPrompts.js';
 import { getCurrentApiInfo, normalizeCompletionSource } from './utils.js';
 import { extension_settings } from '../../../extensions.js';
 import { oai_settings } from '../../../openai.js';
@@ -21,7 +21,7 @@ class ReconciliationAIError extends Error {
 
 /**
  * Resolves connection/token settings and sends a single Scene Reconciliation prompt to the LLM,
- * returning the raw response text. Shared by callCombinedReconciliationLLM() so the
+ * returning the raw response text. Shared by callReconciliationLLM() so the
  * connection-resolution/max-tokens/abort-signal setup only lives in one place.
  *
  * Mirrors stmemory.js's generateMemoryWithAI() conventions: resolves connection settings from
@@ -116,17 +116,17 @@ function extractBalancedJsonSubstring(s) {
 }
 
 /**
- * Parses the combined Scene Reconciliation JSON response ({ arc, characters, newCharacters }).
+ * Parses a single-item Scene Reconciliation JSON response ({ title, content, keywords }).
  * Self-contained local equivalent of stmemory.js's parseAIJsonResponse() extraction/repair
  * pipeline (fenced-block -> whole-text -> balanced-substring candidates, JSON.parse then
- * dirty-json repair fallback) - not reused directly because that function validates a single-item
- * {content,title,keywords} shape and would reject this compound multi-section shape.
+ * dirty-json repair fallback) - not reused directly because that function isn't exported from
+ * stmemory.js.
  *
  * @param {string} rawText
- * @returns {{arc: Object|null, characters: Array, newCharacters: Array}}
+ * @returns {{title: string, content: string, keywords: string[]}}
  * @throws {ReconciliationAIError}
  */
-function parseCombinedReconciliationResponse(rawText) {
+function parseSingleReconciliationResponse(rawText) {
     const normalized = normalizeResponseText(rawText);
     if (!normalized) {
         throw new ReconciliationAIError('Scene reconciliation response is empty.');
@@ -141,13 +141,13 @@ function parseCombinedReconciliationResponse(rawText) {
         for (const parse of [(s) => JSON.parse(s), (s) => dirtyJson.parse(s)]) {
             try {
                 const parsed = parse(candidate);
-                const isCombinedShape = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-                    && ('arc' in parsed || 'characters' in parsed || 'newCharacters' in parsed);
-                if (isCombinedShape) {
+                const isValidShape = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                    && typeof parsed.content === 'string' && parsed.content.trim();
+                if (isValidShape) {
                     return {
-                        arc: parsed.arc && typeof parsed.arc === 'object' ? parsed.arc : null,
-                        characters: Array.isArray(parsed.characters) ? parsed.characters : [],
-                        newCharacters: Array.isArray(parsed.newCharacters) ? parsed.newCharacters : [],
+                        title: typeof parsed.title === 'string' ? parsed.title : '',
+                        content: parsed.content,
+                        keywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
                     };
                 }
             } catch {
@@ -160,39 +160,21 @@ function parseCombinedReconciliationResponse(rawText) {
 }
 
 /**
- * Sends the combined Scene Reconciliation prompt to the LLM and parses the compound JSON
+ * Sends a single-item Scene Reconciliation prompt to the LLM and parses the resulting JSON
  * response. This is the single LLM-call boundary used by reconcileSceneWithLorebook() - one
- * call covers the Arc entry plus every existing/new character, replacing the former
- * one-call-per-item approach.
+ * call per lorebook entry update/creation (Arc entry, each existing character, each new
+ * character), restoring the original per-item architecture.
  *
  * @param {string} prompt
  * @param {Object} profileSettings - A memory-generation profile (same shape used by stmemory.js)
  * @param {Object} [options]
  * @param {AbortSignal} [options.signal]
- * @returns {Promise<{arc: Object|null, characters: Array, newCharacters: Array}>}
+ * @returns {Promise<{title: string, content: string, keywords: string[]}>}
  * @throws {ReconciliationAIError}
  */
-export async function callCombinedReconciliationLLM(prompt, profileSettings, options = {}) {
+export async function callReconciliationLLM(prompt, profileSettings, options = {}) {
     const rawText = await sendReconciliationLLMRequest(prompt, profileSettings, options);
-    return parseCombinedReconciliationResponse(rawText);
-}
-
-/**
- * Finds the item in a combined-response array (response.characters / response.newCharacters)
- * matching a given character name, case-insensitively, and validates it has usable content.
- * @param {Array} items
- * @param {string} name
- * @returns {Object|null} The matched item if present and valid (has a non-empty content string), else null
- */
-function findValidResponseItem(items, name) {
-    const lower = String(name || '').trim().toLowerCase();
-    const match = (Array.isArray(items) ? items : []).find(
-        (item) => String(item?.characterName || '').trim().toLowerCase() === lower,
-    );
-    if (!match || typeof match.content !== 'string' || !match.content.trim()) {
-        return null;
-    }
-    return match;
+    return parseSingleReconciliationResponse(rawText);
 }
 
 /**
@@ -203,12 +185,11 @@ function findValidResponseItem(items, name) {
  * later via applySceneReconciliationChanges() in addlore.js, after user approval via a
  * preview UI (not part of this task).
  *
- * Makes a SINGLE combined LLM call covering the Arc entry plus every existing/new character
- * (see getCombinedSceneReconciliationPrompt() / callCombinedReconciliationLLM()). Per-item fault
- * isolation is preserved at the distribution stage: if the response is missing or malformed for
- * one specific character, only that character's operation/proposal is marked as failed - it does
- * not null out the rest of the response. Only a total call failure (network error, completely
- * unparseable response) marks every attempted operation as failed.
+ * Makes ONE LLM call PER lorebook entry update/creation (Arc entry, each existing character,
+ * each new character) - this avoids one entry's length/token needs starving every other entry's
+ * response of tokens, which a single combined call could do. Per-item fault isolation: if one
+ * character's (or the Arc's, or one new-character's) call fails, only that operation/proposal is
+ * marked as failed and processing continues for the rest.
  *
  * @param {Object} params
  * @param {Object} params.compiledScene - Output of chatcompile.js's compileScene()
@@ -276,15 +257,28 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
         errors,
     };
 
-    // 1. Resolve the Arc entry (unless skipped).
-    let arcEntryForPrompt = null;
+    // 1. Resolve the Arc entry (unless skipped) and make ONE LLM call for it.
     if (!options.skipArcReconciliation) {
         try {
             const { entry: arcEntry } = getArcEntry(lorebookData, lorebookData);
             if (arcEntry) {
-                arcEntryForPrompt = arcEntry;
-                result.arcOperation.entry = arcEntry;
-                result.arcOperation.oldContent = arcEntry.content || '';
+                const oldContent = arcEntry.content || '';
+                try {
+                    const prompt = getArcReconciliationPrompt({ arcEntry, compiledScene });
+                    const response = await callReconciliationLLM(prompt, profileSettings, { signal: options.signal });
+                    result.arcOperation = {
+                        status: 'processed',
+                        entry: arcEntry,
+                        oldContent,
+                        proposedContent: response.content,
+                        error: null,
+                    };
+                    result.metadata.operationsRequiringPreview++;
+                } catch (error) {
+                    const message = `Arc entry reconciliation failed: ${error?.message || error}`;
+                    result.arcOperation = { status: 'error', entry: arcEntry, oldContent, proposedContent: null, error: message };
+                    errors.push(message);
+                }
             }
         } catch (error) {
             const message = `Arc entry lookup failed: ${error?.message || error}`;
@@ -313,90 +307,24 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
         }
     }
 
-    // 3. Nothing to reconcile - skip the LLM call entirely.
-    const hasArcToProcess = result.arcOperation.status !== 'error' && !!arcEntryForPrompt;
-    if (!hasArcToProcess && existingCharactersToSend.length === 0 && newCharacterNamesToSend.length === 0) {
-        result.success = errors.length === 0;
-        return result;
-    }
-
-    // 4. Build and send ONE combined prompt covering everything above.
-    const prompt = getCombinedSceneReconciliationPrompt({
-        arcEntry: hasArcToProcess ? arcEntryForPrompt : null,
-        existingCharacters: existingCharactersToSend,
-        newCharacterNames: newCharacterNamesToSend,
-        compiledScene,
-    });
-
-    let response = null;
-    let totalFailureMessage = null;
-    try {
-        response = await callCombinedReconciliationLLM(prompt, profileSettings, { signal: options.signal });
-    } catch (error) {
-        totalFailureMessage = `Scene reconciliation failed: ${error?.message || error}`;
-        errors.push(totalFailureMessage);
-    }
-
-    // 5. Distribute the response into the exact same result shape as before.
-    if (hasArcToProcess) {
-        if (totalFailureMessage) {
-            result.arcOperation = {
-                status: 'error',
-                entry: arcEntryForPrompt,
-                oldContent: arcEntryForPrompt.content || '',
-                proposedContent: null,
-                error: totalFailureMessage,
-            };
-        } else if (response.arc && typeof response.arc.content === 'string' && response.arc.content.trim()) {
-            result.arcOperation = {
-                status: 'processed',
-                entry: arcEntryForPrompt,
-                oldContent: arcEntryForPrompt.content || '',
-                proposedContent: response.arc.content,
-                error: null,
-            };
-            result.metadata.operationsRequiringPreview++;
-        } else {
-            const message = 'Arc entry reconciliation failed: response is missing or malformed "arc" section.';
-            result.arcOperation = {
-                status: 'error',
-                entry: arcEntryForPrompt,
-                oldContent: arcEntryForPrompt.content || '',
-                proposedContent: null,
-                error: message,
-            };
-            errors.push(message);
-        }
-    }
-
+    // 3. For each existing character, make ONE LLM call and continue on per-item failure.
     for (const { name, entry } of existingCharactersToSend) {
         const oldContent = entry.content || '';
-        if (totalFailureMessage) {
-            result.characterOperations.push({
-                characterName: name,
-                status: 'error',
-                entry,
-                oldContent,
-                proposedContent: null,
-                operationType: 'update',
-                error: totalFailureMessage,
-            });
-            continue;
-        }
-        const matched = findValidResponseItem(response.characters, name);
-        if (matched) {
+        try {
+            const prompt = getCharacterReconciliationPrompt({ entry, characterName: name, compiledScene });
+            const response = await callReconciliationLLM(prompt, profileSettings, { signal: options.signal });
             result.characterOperations.push({
                 characterName: name,
                 status: 'processed',
                 entry,
                 oldContent,
-                proposedContent: matched.content,
+                proposedContent: response.content,
                 operationType: 'update',
                 error: null,
             });
             result.metadata.operationsRequiringPreview++;
-        } else {
-            const message = `Character reconciliation failed for "${name}": response is missing or malformed for this character.`;
+        } catch (error) {
+            const message = `Character reconciliation failed for "${name}": ${error?.message || error}`;
             result.characterOperations.push({
                 characterName: name,
                 status: 'error',
@@ -410,39 +338,28 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
         }
     }
 
+    // 4. For each new character candidate, make ONE LLM call and continue on per-item failure.
     for (const name of newCharacterNamesToSend) {
-        if (totalFailureMessage) {
-            // No dedicated 'error' state exists in the newCharacterProposals status enum
-            // (pending|created|rejected) - 'rejected' is reused here matching today's convention
-            // for generation failures, so the proposal is excluded from
-            // applySceneReconciliationChanges() by default.
-            result.newCharacterProposals.push({
-                characterName: name,
-                status: 'rejected',
-                entry: null,
-                proposedContent: null,
-                proposedTitle: name,
-                proposedKeywords: [],
-                userApproved: false,
-                userEdits: null,
-            });
-            continue;
-        }
-        const matched = findValidResponseItem(response.newCharacters, name);
-        if (matched) {
+        try {
+            const prompt = getNewCharacterEntryPrompt({ characterName: name, compiledScene });
+            const response = await callReconciliationLLM(prompt, profileSettings, { signal: options.signal });
             result.newCharacterProposals.push({
                 characterName: name,
                 status: 'pending',
                 entry: null,
-                proposedContent: matched.content,
-                proposedTitle: matched.title || name,
-                proposedKeywords: Array.isArray(matched.keywords) ? matched.keywords : [],
+                proposedContent: response.content,
+                proposedTitle: response.title || name,
+                proposedKeywords: Array.isArray(response.keywords) ? response.keywords : [],
                 userApproved: false,
                 userEdits: null,
             });
             result.metadata.operationsRequiringPreview++;
-        } else {
-            const message = `New character profile generation failed for "${name}": response is missing or malformed for this character.`;
+        } catch (error) {
+            const message = `New character profile generation failed for "${name}": ${error?.message || error}`;
+            // No dedicated 'error' state exists in the newCharacterProposals status enum
+            // (pending|created|rejected) - 'rejected' is reused here matching the original
+            // convention for generation failures, so the proposal is excluded from
+            // applySceneReconciliationChanges() by default.
             result.newCharacterProposals.push({
                 characterName: name,
                 status: 'rejected',
