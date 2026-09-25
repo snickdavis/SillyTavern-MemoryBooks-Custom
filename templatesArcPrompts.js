@@ -650,8 +650,9 @@ function formatSceneMessages(compiledScene) {
  * approach (see sceneReconciliation.js's reconcileSceneWithLorebook()).
  *
  * Carries over the same reconciliation instructions (preserve non-contradicted canon, rewrite
- * only contradicted sections, ~100-200 words per character / ~200-350 for the Arc) and the same
- * new-profile instructions (~150-300 words, Identity/Appearance/Role/Traits/What Happened/
+ * only contradicted sections, ~100-200 words per character / no fixed target for the Arc, which
+ * is an accumulating timeline whose full existing length and detail must be preserved) and the
+ * same new-profile instructions (~150-300 words, Identity/Appearance/Role/Traits/What Happened/
  * Continuity Hooks) previously split across getCharacterEntryReconciliationPrompt() and
  * getNewCharacterEntryPrompt(), just adapted to ask for all of them in one response.
  *
@@ -678,7 +679,7 @@ If a CURRENT ARC ENTRY and/or CURRENT CHARACTER ENTRIES are provided below, for 
 3. Where the NEW SCENE directly contradicts the current content (for example, "X is about to leave" becoming "X has now arrived"), rewrite only the contradicted sections to reflect the new truth. Leave everything else unchanged.
 4. Add any new facts, relationships, or status changes revealed by the NEW SCENE that do not already appear in the current content.
 5. Do not invent facts that are not supported by either the current content or the NEW SCENE.
-6. Keep the Arc entry's "content" a high-level summary of the major beats and turns in the timeline so far, not exhaustive narration. Target roughly 200-350 words.
+6. The Arc entry's "content" is an ACCUMULATING timeline spanning the entire story so far (e.g. multiple parts and arcs) and may already be long. Preserve its full existing length, structure, and level of detail exactly as established. Do not compress, summarize, shorten, or remove any prior beat, turn, or detail that the NEW SCENE does not directly contradict - only amend the specific contradicted portion(s) per rule 3, or append the new beat(s) introduced by the NEW SCENE per rule 4. There is no target length: the appropriate length scales with however much history has already accumulated plus whatever the new scene adds.
 7. Keep each character entry's "content" concise and high-level: current status, key relationship or status changes from the NEW SCENE, and anything a future scene would need to know. Cut minor blow-by-blow detail. Target roughly 100-200 words.
 
 If any NEW CHARACTERS TO PROFILE are listed below, for each one write a brand-new profile based only on what the NEW SCENE establishes (no prior canon entry exists for them). Cover, in order (keep each section short): Identity - name, aliases, and origin, if established; Appearance - physical description, if established; Role & Relationships - their role in the story and relationships to other characters; Key Traits - personality and motivations as shown in the scene; What Happened - a brief summary of their actions in this scene; Continuity Hooks - facts, promises, secrets, or open threads likely to matter later. Do not invent facts not supported by the NEW SCENE. Target 150-300 words for each "content" field.
