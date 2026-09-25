@@ -1,7 +1,7 @@
 // Copyright (C) 2024–2026 Aiko Hanasaki
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { getArcEntry, getCharacterEntry, filterCharactersForReconciliation } from './addlore.js';
+import { getArcEntry, getCharacterEntry, filterCharactersForReconciliation, detectCharacterNamesInSceneText } from './addlore.js';
 import { sendRawCompletionRequest, parseAIJsonResponse } from './stmemory.js';
 import { getCharacterEntryReconciliationPrompt, getNewCharacterEntryPrompt } from './templatesArcPrompts.js';
 import { getCurrentApiInfo, normalizeCompletionSource } from './utils.js';
@@ -127,6 +127,23 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
     const presentCharacterNames = Array.isArray(compiledScene?.metadata?.presentCharacterNames)
         ? compiledScene.metadata.presentCharacterNames
         : [];
+    // Handles single-narrator-bot chats: none of the tagged characters are ever message senders,
+    // so presentCharacterNames alone stays empty there - typeof-guarded since the test sandbox
+    // doesn't stub this addlore.js export (see sceneReconciliation.test.js header comment).
+    const detectedCharacterNames = typeof detectCharacterNamesInSceneText === 'function'
+        ? detectCharacterNamesInSceneText(compiledScene, lorebookData, options)
+        : [];
+    const characterNames = [];
+    const seenCharacterNamesLower = new Set();
+    for (const name of [...presentCharacterNames, ...detectedCharacterNames]) {
+        const trimmed = String(name || '').trim();
+        const lower = trimmed.toLowerCase();
+        if (!trimmed || seenCharacterNamesLower.has(lower)) {
+            continue;
+        }
+        seenCharacterNamesLower.add(lower);
+        characterNames.push(trimmed);
+    }
 
     const result = {
         success: true,
@@ -134,7 +151,7 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
         characterOperations: [],
         newCharacterProposals: [],
         metadata: {
-            totalCharactersInScene: presentCharacterNames.length,
+            totalCharactersInScene: characterNames.length,
             existingCharacterCount: 0,
             newCharacterCandidatesCount: 0,
             operationsRequiringPreview: 0,
@@ -182,7 +199,7 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
     // 2 & 3. Existing-character reconciliation and new-character profile generation
     if (!options.skipCharacterReconciliation || !options.skipNewCharacterCreation) {
         const filtered = filterCharactersForReconciliation(
-            presentCharacterNames,
+            characterNames,
             lorebookData,
             options.filterOptions || {},
         );

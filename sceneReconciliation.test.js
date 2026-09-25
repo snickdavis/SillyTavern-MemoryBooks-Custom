@@ -38,6 +38,7 @@ function loadAddloreLookups() {
         getArcEntry: context.getArcEntry,
         getCharacterEntry: context.getCharacterEntry,
         filterCharactersForReconciliation: context.filterCharactersForReconciliation,
+        detectCharacterNamesInSceneText: context.detectCharacterNamesInSceneText,
     };
 }
 
@@ -54,6 +55,7 @@ function loadSceneReconciliation({ callReconciliationLLM } = {}) {
         getArcEntry: lookups.getArcEntry,
         getCharacterEntry: lookups.getCharacterEntry,
         filterCharactersForReconciliation: lookups.filterCharactersForReconciliation,
+        detectCharacterNamesInSceneText: lookups.detectCharacterNamesInSceneText,
     };
     vm.createContext(context);
     vm.runInContext(source, context, { filename: 'sceneReconciliation.js (sandbox)' });
@@ -64,6 +66,13 @@ function loadSceneReconciliation({ callReconciliationLLM } = {}) {
 
 function scene(presentCharacterNames) {
     return { metadata: { presentCharacterNames } };
+}
+
+function sceneWithMessageText(messageTexts, presentCharacterNames = []) {
+    return {
+        messages: messageTexts.map(mes => ({ mes })),
+        metadata: { presentCharacterNames },
+    };
 }
 
 test('skips Arc reconciliation when no Arc entry exists in the lorebook', async () => {
@@ -223,4 +232,30 @@ test('collects an error and does not abort when new-character profile generation
     assert.equal(result.newCharacterProposals[0].status, 'rejected');
     assert.equal(result.errors.length, 1);
     assert.match(result.errors[0], /Bob/);
+});
+
+test('processes a character whose name only appears in message text via the detectCharacterNamesInSceneText union', async () => {
+    const charLlmCalls = [];
+    const reconcileSceneWithLorebook = loadSceneReconciliation({
+        callReconciliationLLM: async (prompt) => {
+            charLlmCalls.push(prompt);
+            return { content: `updated ${prompt}` };
+        },
+    });
+    const zephyrEntry = { uid: 1, comment: 'Zephyr', STMB_characterName: 'Zephyr' };
+    const lorebookData = { entries: { 1: zephyrEntry } };
+
+    const result = await reconcileSceneWithLorebook({
+        compiledScene: sceneWithMessageText(['The narrator describes Zephyr entering the hall.']),
+        lorebookName: 'MyBook',
+        lorebookData,
+        profileSettings: {},
+        options: { skipArcReconciliation: true, skipNewCharacterCreation: true },
+    });
+
+    assert.equal(result.metadata.totalCharactersInScene, 1);
+    assert.equal(result.characterOperations.length, 1);
+    assert.equal(result.characterOperations[0].characterName, 'Zephyr');
+    assert.equal(result.characterOperations[0].status, 'processed');
+    assert.equal(charLlmCalls.length, 1);
 });

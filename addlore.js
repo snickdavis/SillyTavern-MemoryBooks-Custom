@@ -1773,6 +1773,124 @@ export function filterCharactersForReconciliation(characterNames, lorebookData, 
 }
 
 /**
+ * Common capitalized English words that are not character names, excluded from the heuristic
+ * new-character detection in detectCharacterNamesInSceneText() to reduce false positives from
+ * sentence-starters, pronouns, and common fantasy/anime RP setting/element words.
+ * @private
+ */
+const CHARACTER_NAME_DETECTION_STOPWORDS_LOWER = new Set([
+    'the', 'a', 'an', 'he', 'she', 'they', 'i', 'you', 'we', 'it',
+    'this', 'that', 'these', 'those', 'his', 'her', 'their', 'its',
+    'then', 'now', 'but', 'and', 'so', 'if', 'when', 'where', 'what', 'why', 'how',
+    'okay', 'yes', 'no', 'fine', 'well', 'oh', 'ah', 'not',
+    'every', 'day', 'days', 'tomorrow', 'today',
+    'land', 'village', 'fire', 'wind', 'water', 'earth', 'lightning',
+].map(word => word.toLowerCase()));
+
+/**
+ * Detects candidate character names directly from a compiled scene's message text, for chats
+ * where a single narrator/GM bot voices multiple named characters in prose (so none of them are
+ * ever message senders and compiledScene.metadata.presentCharacterNames stays empty).
+ *
+ * Combines two sources:
+ *  A. Existing character entries whose canonical name (STMB_characterName ||
+ *     characterFilter.names[0] || comment) appears as a whole word anywhere in the scene text.
+ *  B. Heuristic candidates: capitalized word tokens not already matched in (A), not already in
+ *     compiledScene.metadata.presentCharacterNames, and not matching options.excludePatterns,
+ *     filtered by a stopword list and a minimum frequency, capped and sorted by frequency.
+ *
+ * @param {Object} compiledScene - Output of chatcompile.js's compileScene()
+ * @param {Object} lorebookData
+ * @param {Object} [options]
+ * @param {Array<string|RegExp>} [options.excludePatterns] - Names/patterns to exclude from the heuristic pass (e.g. user name)
+ * @param {number} [options.minCandidateFrequency=2] - Minimum occurrence count for a heuristic candidate
+ * @param {number} [options.maxNewCandidates=5] - Max heuristic candidates returned
+ * @returns {string[]} Deduped candidate names: existing-entry matches first, then heuristic candidates by descending frequency
+ */
+export function detectCharacterNamesInSceneText(compiledScene, lorebookData, options = {}) {
+    const messages = Array.isArray(compiledScene?.messages) ? compiledScene.messages : [];
+    const sceneText = messages.map(message => String(message?.mes || '')).join('\n');
+
+    const presentCharacterNames = Array.isArray(compiledScene?.metadata?.presentCharacterNames)
+        ? compiledScene.metadata.presentCharacterNames
+        : [];
+    const presentCharacterNamesLower = new Set(presentCharacterNames.map(name => String(name || '').trim().toLowerCase()));
+
+    const excludePatterns = Array.isArray(options.excludePatterns) ? options.excludePatterns : [];
+    const minCandidateFrequency = options.minCandidateFrequency ?? 2;
+    const maxNewCandidates = options.maxNewCandidates ?? 5;
+
+    const isExcludedByPattern = (name) => excludePatterns.some(pattern => {
+        if (pattern instanceof RegExp) {
+            return pattern.test(name);
+        }
+        return String(pattern || '').trim().toLowerCase() === name.toLowerCase();
+    });
+
+    // A. Existing character entries whose canonical name appears in the scene text
+    const entries = lorebookData?.entries ? Object.values(lorebookData.entries) : [];
+    const existingMatches = [];
+    const existingMatchedLower = new Set();
+
+    for (const entry of entries) {
+        const isCharacterEntry = entry?.STMB_characterEntryType === 'character'
+            || Boolean(String(entry?.STMB_characterName || '').trim())
+            || Boolean((Array.isArray(entry?.characterFilter?.names) ? entry.characterFilter.names[0] : ''));
+        if (!isCharacterEntry) {
+            continue;
+        }
+
+        const name = String(entry.STMB_characterName || entry.characterFilter?.names?.[0] || entry.comment || '').trim();
+        if (!name) {
+            continue;
+        }
+
+        const lower = name.toLowerCase();
+        if (existingMatchedLower.has(lower)) {
+            continue;
+        }
+
+        const pattern = new RegExp('\\b' + escapeRegex(name) + '\\b', 'i');
+        if (pattern.test(sceneText)) {
+            existingMatches.push(name);
+            existingMatchedLower.add(lower);
+        }
+    }
+
+    // B. Heuristic new-character candidates from capitalized word tokens
+    const tokens = sceneText.match(/\b[A-Z][a-zA-Z'-]{2,}\b/g) || [];
+    const frequencyByLower = new Map();
+
+    for (const token of tokens) {
+        const lower = token.toLowerCase();
+        if (CHARACTER_NAME_DETECTION_STOPWORDS_LOWER.has(lower)) {
+            continue;
+        }
+        if (existingMatchedLower.has(lower) || presentCharacterNamesLower.has(lower)) {
+            continue;
+        }
+        if (isExcludedByPattern(token)) {
+            continue;
+        }
+
+        const record = frequencyByLower.get(lower);
+        if (record) {
+            record.count++;
+        } else {
+            frequencyByLower.set(lower, { name: token, count: 1 });
+        }
+    }
+
+    const heuristicCandidates = Array.from(frequencyByLower.values())
+        .filter(record => record.count >= minCandidateFrequency)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, maxNewCandidates)
+        .map(record => record.name);
+
+    return [...existingMatches, ...heuristicCandidates];
+}
+
+/**
  * Applies a reconciled Arc entry update in place, preserving uid/other fields
  * via applyRegenerationReplacement(). Saves via saveWorldInfo().
  *

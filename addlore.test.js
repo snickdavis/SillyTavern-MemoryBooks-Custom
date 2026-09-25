@@ -20,6 +20,7 @@ const ADDLORE_EXPORTS = [
     'getCharacterEntry',
     'setCharacterEntryBinding',
     'filterCharactersForReconciliation',
+    'detectCharacterNamesInSceneText',
     'upsertArcEntry',
     'upsertCharacterEntry',
     'createNewCharacterEntry',
@@ -80,6 +81,13 @@ function loadAddlore(overrides = {}) {
 
 function lorebook(entries) {
     return { entries: Object.fromEntries(entries.map(entry => [entry.uid, entry])) };
+}
+
+function compiledSceneWithText(messageTexts, presentCharacterNames = []) {
+    return {
+        messages: messageTexts.map(mes => ({ mes })),
+        metadata: { presentCharacterNames },
+    };
 }
 
 // --- getArcEntry() ---
@@ -211,6 +219,118 @@ test('filterCharactersForReconciliation buckets existing, new, and excluded char
     assert.equal(result.metadata.existingCount, 1);
     assert.equal(result.metadata.newCount, 1);
     assert.equal(result.metadata.excludedCount, 1);
+});
+
+// --- detectCharacterNamesInSceneText() ---
+
+test('detectCharacterNamesInSceneText finds an existing character entry canonical name mentioned in message text', () => {
+    const { api } = loadAddlore();
+    const aliceEntry = { uid: 1, comment: 'Alice', STMB_characterName: 'Alice' };
+    const lorebookData = lorebook([aliceEntry]);
+    const scene = compiledSceneWithText(['The narrator describes Alice walking into the tavern.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), ['Alice']);
+});
+
+test('detectCharacterNamesInSceneText matches an existing entry via the characterFilter.names[0] fallback', () => {
+    const { api } = loadAddlore();
+    const bobEntry = { uid: 1, comment: 'Bob Notes', characterFilter: { names: ['Bob'] } };
+    const lorebookData = lorebook([bobEntry]);
+    const scene = compiledSceneWithText(['Bob walked to the market and back.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), ['Bob']);
+});
+
+test('detectCharacterNamesInSceneText returns a repeated capitalized name as a heuristic candidate', () => {
+    const { api } = loadAddlore();
+    const lorebookData = lorebook([]);
+    const scene = compiledSceneWithText([
+        'Zephyr walked into the room.',
+        'Zephyr smiled and said hello.',
+    ]);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), ['Zephyr']);
+});
+
+test('detectCharacterNamesInSceneText does not return a capitalized word seen only once', () => {
+    const { api } = loadAddlore();
+    const lorebookData = lorebook([]);
+    const scene = compiledSceneWithText(['Zephyr walked into the room once and was never mentioned again.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), []);
+});
+
+test('detectCharacterNamesInSceneText excludes common stopwords regardless of frequency', () => {
+    const { api } = loadAddlore();
+    const lorebookData = lorebook([]);
+    const scene = compiledSceneWithText(['The The The. Okay Okay Okay.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), []);
+});
+
+test('detectCharacterNamesInSceneText does not duplicate names already in compiledScene.metadata.presentCharacterNames', () => {
+    const { api } = loadAddlore();
+    const lorebookData = lorebook([]);
+    const scene = compiledSceneWithText(
+        ['Zephyr appeared. Zephyr spoke again.'],
+        ['Zephyr'],
+    );
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), []);
+});
+
+test('detectCharacterNamesInSceneText honors options.excludePatterns for both string and RegExp forms', () => {
+    const { api, context } = loadAddlore();
+    const lorebookData = lorebook([]);
+    const scene = compiledSceneWithText([
+        'Narrator spoke. Narrator continued. Zephyr answered. Zephyr answered again.',
+    ]);
+    // Built by evaluating a regex literal inside the sandbox realm: a host-realm RegExp would fail
+    // the implementation's `pattern instanceof RegExp` check across the vm context boundary.
+    const zephyrPattern = vm.runInContext('/^Zeph/', context);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, {
+        excludePatterns: ['Narrator', zephyrPattern],
+    });
+
+    assert.deepEqual(structuredClone(result), []);
+});
+
+test('detectCharacterNamesInSceneText caps heuristic candidates via options.maxNewCandidates, keeping the highest-frequency ones', () => {
+    const { api } = loadAddlore();
+    const lorebookData = lorebook([]);
+    const scene = compiledSceneWithText([
+        'Zephyr Zephyr Zephyr Zephyr.',
+        'Talon Talon Talon.',
+        'Mira Mira.',
+    ]);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { maxNewCandidates: 2 });
+
+    assert.deepEqual(structuredClone(result), ['Zephyr', 'Talon']);
+});
+
+test('detectCharacterNamesInSceneText dedups case-insensitively between existing matches and heuristic candidates', () => {
+    const { api } = loadAddlore();
+    const aliceEntry = { uid: 1, comment: 'Alice', STMB_characterName: 'Alice' };
+    const lorebookData = lorebook([aliceEntry]);
+    const scene = compiledSceneWithText(['Alice greeted Alice again since Alice was repeated.']);
+
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+
+    assert.deepEqual(structuredClone(result), ['Alice']);
 });
 
 // --- upsertArcEntry() / upsertCharacterEntry() / createNewCharacterEntry() ---
