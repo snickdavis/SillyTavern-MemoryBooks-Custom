@@ -1795,17 +1795,23 @@ const CHARACTER_NAME_DETECTION_STOPWORDS_LOWER = new Set([
  * Combines two sources:
  *  A. Existing character entries whose canonical name (STMB_characterName ||
  *     characterFilter.names[0] || comment) appears as a whole word anywhere in the scene text.
+ *     Always runs - this is the reliable part of detection.
  *  B. Heuristic candidates: capitalized word tokens not already matched in (A), not already in
  *     compiledScene.metadata.presentCharacterNames, and not matching options.excludePatterns,
- *     filtered by a stopword list and a minimum frequency, capped and sorted by frequency.
+ *     filtered by a stopword list and a minimum frequency, capped and sorted by frequency. Opt-in
+ *     only (options.includeHeuristicCandidates) - disabled by default because plain capitalized-
+ *     token matching produces false positives (e.g. "I'm"). New-character discovery is now
+ *     expected to come from explicit user input (see options.manualNewCharacterNames in
+ *     sceneReconciliation.js's reconcileSceneWithLorebook()) rather than guessing.
  *
  * @param {Object} compiledScene - Output of chatcompile.js's compileScene()
  * @param {Object} lorebookData
  * @param {Object} [options]
+ * @param {boolean} [options.includeHeuristicCandidates=false] - Opt-in to part B's heuristic candidate guessing
  * @param {Array<string|RegExp>} [options.excludePatterns] - Names/patterns to exclude from the heuristic pass (e.g. user name)
  * @param {number} [options.minCandidateFrequency=2] - Minimum occurrence count for a heuristic candidate
  * @param {number} [options.maxNewCandidates=5] - Max heuristic candidates returned
- * @returns {string[]} Deduped candidate names: existing-entry matches first, then heuristic candidates by descending frequency
+ * @returns {string[]} Deduped candidate names: existing-entry matches first, then heuristic candidates by descending frequency (when enabled)
  */
 export function detectCharacterNamesInSceneText(compiledScene, lorebookData, options = {}) {
     const messages = Array.isArray(compiledScene?.messages) ? compiledScene.messages : [];
@@ -1857,35 +1863,39 @@ export function detectCharacterNamesInSceneText(compiledScene, lorebookData, opt
         }
     }
 
-    // B. Heuristic new-character candidates from capitalized word tokens
-    const tokens = sceneText.match(/\b[A-Z][a-zA-Z'-]{2,}\b/g) || [];
-    const frequencyByLower = new Map();
+    // B. Heuristic new-character candidates from capitalized word tokens - opt-in only, see
+    // options.includeHeuristicCandidates doc above.
+    let heuristicCandidates = [];
+    if (options.includeHeuristicCandidates === true) {
+        const tokens = sceneText.match(/\b[A-Z][a-zA-Z'-]{2,}\b/g) || [];
+        const frequencyByLower = new Map();
 
-    for (const token of tokens) {
-        const lower = token.toLowerCase();
-        if (CHARACTER_NAME_DETECTION_STOPWORDS_LOWER.has(lower)) {
-            continue;
-        }
-        if (existingMatchedLower.has(lower) || presentCharacterNamesLower.has(lower)) {
-            continue;
-        }
-        if (isExcludedByPattern(token)) {
-            continue;
+        for (const token of tokens) {
+            const lower = token.toLowerCase();
+            if (CHARACTER_NAME_DETECTION_STOPWORDS_LOWER.has(lower)) {
+                continue;
+            }
+            if (existingMatchedLower.has(lower) || presentCharacterNamesLower.has(lower)) {
+                continue;
+            }
+            if (isExcludedByPattern(token)) {
+                continue;
+            }
+
+            const record = frequencyByLower.get(lower);
+            if (record) {
+                record.count++;
+            } else {
+                frequencyByLower.set(lower, { name: token, count: 1 });
+            }
         }
 
-        const record = frequencyByLower.get(lower);
-        if (record) {
-            record.count++;
-        } else {
-            frequencyByLower.set(lower, { name: token, count: 1 });
-        }
+        heuristicCandidates = Array.from(frequencyByLower.values())
+            .filter(record => record.count >= minCandidateFrequency)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, maxNewCandidates)
+            .map(record => record.name);
     }
-
-    const heuristicCandidates = Array.from(frequencyByLower.values())
-        .filter(record => record.count >= minCandidateFrequency)
-        .sort((a, b) => b.count - a.count)
-        .slice(0, maxNewCandidates)
-        .map(record => record.name);
 
     return [...existingMatches, ...heuristicCandidates];
 }

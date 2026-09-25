@@ -7008,6 +7008,44 @@ async function showCreateOrReconcileChoicePopup() {
 }
 
 /**
+ * Optional enrichment step before Scene Reconciliation: since reconcileSceneWithLorebook() no
+ * longer guesses new-character candidates from scene text, this asks the user to name any
+ * explicitly. Cancel and blank/empty input are treated identically (no new characters) - this
+ * is an optional enrichment, not a gate, so there's no reason to abort the whole flow over it.
+ * @returns {Promise<string[]>}
+ */
+async function promptForNewCharacterNames() {
+  const content = DOMPurify.sanitize(`
+    <h3>${escapeHtml(translate("New characters?", "STMemoryBooks_SceneReconciliation_NewCharactersTitle"))}</h3>
+    <label for="stmb-scene-recon-new-characters">${escapeHtml(translate(
+      "Is there any notable new characters in this scene?",
+      "STMemoryBooks_SceneReconciliation_NewCharactersLabel",
+    ))}</label>
+    <input id="stmb-scene-recon-new-characters" class="text_pole" type="text" placeholder="${escapeHtml(translate("e.g. Reina, Ino", "STMemoryBooks_SceneReconciliation_NewCharactersPlaceholder"))}">
+  `);
+  const popup = new Popup(content, POPUP_TYPE.TEXT, "", {
+    okButton: translate("Continue", "STMemoryBooks_Continue"),
+    cancelButton: translate("Cancel", "STMemoryBooks_Cancel"),
+  });
+  markStmbPopup(popup);
+
+  const result = await popup.show();
+  // Cancel just means "no new characters" - optional enrichment, not a gate.
+  if (result !== POPUP_RESULT.AFFIRMATIVE) return [];
+
+  const raw = String(popup.dlg.querySelector("#stmb-scene-recon-new-characters")?.value || "");
+  const seen = new Set();
+  const names = [];
+  for (const part of raw.split(",")) {
+    const name = part.trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    names.push(name);
+  }
+  return names;
+}
+
+/**
  * Splices the preview popup's approvals/edits back onto reconciliationResult in place, since
  * applySceneReconciliationChanges() (addlore.js) applies any status:'processed' arc/character
  * operation unconditionally and reads edited content from `proposedContent`, not from a separate
@@ -7063,11 +7101,19 @@ function applySceneReconciliationPreviewDecisions(reconciliationResult, decision
  * reconcileSceneWithLorebook() for proposals, optionally preview/collect approvals via
  * showSceneReconciliationPreviewPopup(), then write via applySceneReconciliationChanges().
  * Never partially writes: any cancellation/compile/AI failure returns false before the apply call.
+ * When allowSceneReconciliationPrompt is false (batch callers like /stmb-catchup), skips
+ * promptForNewCharacterNames() and proceeds with no manually-named new characters.
  * @returns {Promise<boolean>}
  */
-async function runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation = null) {
+async function runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation = null, allowSceneReconciliationPrompt = true) {
   const { profileSettings, settings } = effectiveSettings;
   const recon = getSceneReconciliationModuleSettings(settings);
+
+  // Non-interactive batch callers (allowSceneReconciliationPrompt: false, e.g. /stmb-catchup)
+  // skip this popup too and just proceed with no manually-named new characters.
+  const manualNewCharacterNames = allowSceneReconciliationPrompt
+    ? await promptForNewCharacterNames()
+    : [];
 
   toastr.info(
     translate("Reconciling scene with existing entries...", "STMemoryBooks_SceneReconciliation_Working"),
@@ -7117,6 +7163,7 @@ async function runSceneReconciliationFlow(sceneData, lorebookValidation, effecti
       lorebookName: lorebookValidation.name,
       lorebookData: lorebookValidation.data,
       profileSettings,
+      manualNewCharacterNames,
     });
   } catch (error) {
     toastr.clear();
@@ -7372,7 +7419,7 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
         isProcessingMemory = false;
         return false;
       }
-      return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation);
+      return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation, options.allowSceneReconciliationPrompt !== false);
     }
     if (
       options.forceReconciliationChoice !== "createNew" &&
@@ -7384,7 +7431,7 @@ async function initiateMemoryCreation(selectedProfileIndex = null, options = {})
         return false;
       }
       if (choice === "reconcile") {
-        return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation);
+        return await runSceneReconciliationFlow(sceneData, lorebookValidation, effectiveSettings, manualGroupLorebookValidation, options.allowSceneReconciliationPrompt !== false);
       }
       // choice === "createNew" falls through to the existing behavior, unchanged.
     }

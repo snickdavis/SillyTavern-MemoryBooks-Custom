@@ -259,3 +259,62 @@ test('processes a character whose name only appears in message text via the dete
     assert.equal(result.characterOperations[0].status, 'processed');
     assert.equal(charLlmCalls.length, 1);
 });
+
+test('includes options.manualNewCharacterNames in the candidate union, producing a newCharacterProposals entry for a brand-new name', async () => {
+    const reconcileSceneWithLorebook = loadSceneReconciliation({
+        callReconciliationLLM: async (prompt) => ({
+            content: `bio for ${prompt.replace('new-prompt:', '')}`,
+            title: prompt.replace('new-prompt:', ''),
+            keywords: ['newcomer'],
+        }),
+    });
+    const lorebookData = { entries: {} };
+
+    const result = await reconcileSceneWithLorebook({
+        compiledScene: scene([]),
+        lorebookName: 'MyBook',
+        lorebookData,
+        profileSettings: {},
+        options: {
+            skipArcReconciliation: true,
+            skipCharacterReconciliation: true,
+            manualNewCharacterNames: ['Nadia'],
+        },
+    });
+
+    assert.equal(result.metadata.totalCharactersInScene, 1);
+    assert.equal(result.newCharacterProposals.length, 1);
+    const proposal = result.newCharacterProposals[0];
+    assert.equal(proposal.characterName, 'Nadia');
+    assert.equal(proposal.status, 'pending');
+    assert.equal(proposal.proposedContent, 'bio for Nadia');
+});
+
+test('a manualNewCharacterNames entry matching an existing entry is bucketed as existing, not a new proposal', async () => {
+    const charLlmCalls = [];
+    const reconcileSceneWithLorebook = loadSceneReconciliation({
+        callReconciliationLLM: async (prompt) => {
+            charLlmCalls.push(prompt);
+            return { content: `updated ${prompt}` };
+        },
+    });
+    const aliceEntry = { uid: 1, comment: 'Alice', STMB_characterName: 'Alice' };
+    const lorebookData = { entries: { 1: aliceEntry } };
+
+    const result = await reconcileSceneWithLorebook({
+        compiledScene: scene([]),
+        lorebookName: 'MyBook',
+        lorebookData,
+        profileSettings: {},
+        options: {
+            skipArcReconciliation: true,
+            skipNewCharacterCreation: true,
+            manualNewCharacterNames: ['Alice'],
+        },
+    });
+
+    assert.equal(result.newCharacterProposals.length, 0);
+    assert.equal(result.characterOperations.length, 1);
+    assert.equal(result.characterOperations[0].characterName, 'Alice');
+    assert.equal(charLlmCalls.length, 1);
+});

@@ -668,6 +668,16 @@ export function getCharacterEntryReconciliationPrompt({ entry, compiledScene, ch
             { name: characterName || entry?.title || translate('Unknown', 'common.unknown') },
         );
 
+    const conciseGuidance = isArcEntry
+        ? translate(
+            'Keep the "content" field a high-level summary of the major beats and turns in the timeline so far, not exhaustive narration. Target roughly 200-350 words.',
+            'STMemoryBooks_Reconciliation_ConcisenessArc',
+        )
+        : translate(
+            'Keep the "content" field concise and high-level: current status, key relationship or status changes from the NEW SCENE, and anything a future scene would need to know. Cut minor blow-by-blow detail. Target roughly 100-200 words.',
+            'STMemoryBooks_Reconciliation_ConcisenessCharacter',
+        );
+
     const header = tr(
         'STMemoryBooks_CharacterReconciliationPrompt_Default',
         `You are an expert continuity editor for an ongoing story.
@@ -680,6 +690,7 @@ Follow these rules in order:
 3. Where the NEW SCENE directly contradicts the CURRENT CANON ENTRY (for example, "X is about to leave" becoming "X has now arrived"), rewrite only the contradicted sections to reflect the new truth. Leave everything else unchanged.
 4. Add any new facts, relationships, or status changes revealed by the NEW SCENE that do not already appear in the CURRENT CANON ENTRY.
 5. Do not invent facts that are not supported by either the CURRENT CANON ENTRY or the NEW SCENE.
+6. {{conciseGuidance}}
 
 Return valid JSON only, with no commentary or code fences, in this structure:
 {
@@ -687,7 +698,7 @@ Return valid JSON only, with no commentary or code fences, in this structure:
   "content": "The full reconciled entry content as a single string",
   "keywords": ["keyword1", "keyword2"]
 }`,
-        { subject },
+        { subject, conciseGuidance },
     );
 
     const lines = [header, ''];
@@ -724,15 +735,15 @@ export function getNewCharacterEntryPrompt({ characterName, compiledScene, conte
 
 The character "{{name}}" appears in the NEW SCENE below for the first time. No prior canon entry exists for them yet. Your task is to write a new character profile entry based only on what the NEW SCENE (and, if provided, the CONTEXT) establishes.
 
-Write the "content" field as a profile covering, in order:
+Write the "content" field as a brief profile covering, in order (keep each section short):
 1. Identity - name, aliases, and origin, if established.
 2. Appearance - physical description, if established.
 3. Role & Relationships - their role in the story and relationships to the protagonist and other characters.
 4. Key Traits - personality and motivations as shown in the scene.
-5. What Happened - a summary of their actions in this scene.
+5. What Happened - a brief summary of their actions in this scene.
 6. Continuity Hooks - facts, promises, secrets, or open threads likely to matter later.
 
-Do not invent facts that are not supported by the NEW SCENE or CONTEXT. Target 300-600 words for the "content" field.
+Do not invent facts that are not supported by the NEW SCENE or CONTEXT. Target 150-300 words for the "content" field.
 
 Return valid JSON only, with no commentary or code fences, in this structure:
 {

@@ -112,6 +112,11 @@ export async function callReconciliationLLM(prompt, profileSettings, options = {
  * @param {boolean} [params.options.skipNewCharacterCreation]
  * @param {AbortSignal} [params.options.signal]
  * @param {Object} [params.options.filterOptions] - Forwarded to filterCharactersForReconciliation() (e.g. excludePatterns)
+ * @param {string[]} [params.options.manualNewCharacterNames=[]] - Explicit user-provided candidate
+ *   names (replaces automatic heuristic new-character guessing). Unioned with
+ *   presentCharacterNames and detectCharacterNamesInSceneText()'s existing-entry matches before
+ *   filterCharactersForReconciliation() buckets them into existing vs. new - a manual name that
+ *   already has an entry is simply bucketed as existing (harmless).
  * @returns {Promise<{
  *   success: boolean,
  *   arcOperation: {status: 'skipped'|'processed'|'error', entry: Object|null, oldContent: string|null, proposedContent: string|null, error: string|null},
@@ -133,9 +138,12 @@ export async function reconcileSceneWithLorebook({ compiledScene, lorebookName, 
     const detectedCharacterNames = typeof detectCharacterNamesInSceneText === 'function'
         ? detectCharacterNamesInSceneText(compiledScene, lorebookData, options)
         : [];
+    const manualNewCharacterNames = Array.isArray(options.manualNewCharacterNames)
+        ? options.manualNewCharacterNames
+        : [];
     const characterNames = [];
     const seenCharacterNamesLower = new Set();
-    for (const name of [...presentCharacterNames, ...detectedCharacterNames]) {
+    for (const name of [...presentCharacterNames, ...detectedCharacterNames, ...manualNewCharacterNames]) {
         const trimmed = String(name || '').trim();
         const lower = trimmed.toLowerCase();
         if (!trimmed || seenCharacterNamesLower.has(lower)) {

@@ -253,7 +253,7 @@ test('detectCharacterNamesInSceneText returns a repeated capitalized name as a h
         'Zephyr smiled and said hello.',
     ]);
 
-    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { includeHeuristicCandidates: true });
 
     assert.deepEqual(structuredClone(result), ['Zephyr']);
 });
@@ -263,7 +263,7 @@ test('detectCharacterNamesInSceneText does not return a capitalized word seen on
     const lorebookData = lorebook([]);
     const scene = compiledSceneWithText(['Zephyr walked into the room once and was never mentioned again.']);
 
-    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { includeHeuristicCandidates: true });
 
     assert.deepEqual(structuredClone(result), []);
 });
@@ -273,7 +273,7 @@ test('detectCharacterNamesInSceneText excludes common stopwords regardless of fr
     const lorebookData = lorebook([]);
     const scene = compiledSceneWithText(['The The The. Okay Okay Okay.']);
 
-    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { includeHeuristicCandidates: true });
 
     assert.deepEqual(structuredClone(result), []);
 });
@@ -286,7 +286,7 @@ test('detectCharacterNamesInSceneText does not duplicate names already in compil
         ['Zephyr'],
     );
 
-    const result = api.detectCharacterNamesInSceneText(scene, lorebookData);
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { includeHeuristicCandidates: true });
 
     assert.deepEqual(structuredClone(result), []);
 });
@@ -302,6 +302,7 @@ test('detectCharacterNamesInSceneText honors options.excludePatterns for both st
     const zephyrPattern = vm.runInContext('/^Zeph/', context);
 
     const result = api.detectCharacterNamesInSceneText(scene, lorebookData, {
+        includeHeuristicCandidates: true,
         excludePatterns: ['Narrator', zephyrPattern],
     });
 
@@ -317,7 +318,7 @@ test('detectCharacterNamesInSceneText caps heuristic candidates via options.maxN
         'Mira Mira.',
     ]);
 
-    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { maxNewCandidates: 2 });
+    const result = api.detectCharacterNamesInSceneText(scene, lorebookData, { includeHeuristicCandidates: true, maxNewCandidates: 2 });
 
     assert.deepEqual(structuredClone(result), ['Zephyr', 'Talon']);
 });
