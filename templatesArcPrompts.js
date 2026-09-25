@@ -647,10 +647,9 @@ function formatSceneMessages(compiledScene) {
  * Build the Scene Reconciliation prompt for the Arc entry ONLY - one call per lorebook entry
  * (restored per-item architecture; see sceneReconciliation.js's reconcileSceneWithLorebook()).
  *
- * Carries over the exact preserve-full-length instruction (rule 6 of the former combined
- * prompt): the Arc entry is an accumulating timeline whose full existing length, structure, and
- * detail must be preserved - only the contradicted portion is amended, or new beats appended.
- * No word-count target, since the appropriate length scales with accumulated history.
+ * Deliberately carries no length/compression guidance in either direction - an earlier rule 6
+ * forcing verbatim preservation of the full accumulating history caused production responses to
+ * hit the completion-token cap and get cut off mid-JSON. Reverted to the plain 5-rule contract.
  *
  * @param {Object} params
  * @param {Object} params.arcEntry - Arc entry object (uses entry.content)
@@ -669,7 +668,6 @@ A NEW SCENE has just occurred. Your task is to reconcile the CURRENT ARC ENTRY b
 3. Where the NEW SCENE directly contradicts the current content (for example, "X is about to leave" becoming "X has now arrived"), rewrite only the contradicted sections to reflect the new truth. Leave everything else unchanged.
 4. Add any new facts, relationships, or status changes revealed by the NEW SCENE that do not already appear in the current content.
 5. Do not invent facts that are not supported by either the current content or the NEW SCENE.
-6. The Arc entry's "content" is an ACCUMULATING timeline spanning the entire story so far (e.g. multiple parts and arcs) and may already be long. Preserve its full existing length, structure, and level of detail exactly as established. Do not compress, summarize, shorten, or remove any prior beat, turn, or detail that the NEW SCENE does not directly contradict - only amend the specific contradicted portion(s) per rule 3, or append the new beat(s) introduced by the NEW SCENE per rule 4. There is no target length: the appropriate length scales with however much history has already accumulated plus whatever the new scene adds.
 
 Return valid JSON only, with no commentary or code fences, in EXACTLY this structure:
 {
